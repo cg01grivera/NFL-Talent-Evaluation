@@ -766,7 +766,8 @@ run_estimation_for_position <- function(pos, data, candidates, representative_ca
                                          skip_rmse = TRUE, force_recompute_bias = FALSE,
                                          secondary_candidates = NULL, secondary_representative_candidate = NULL,
                                          sig_window_fn = NULL, run_coverage_spotcheck = FALSE,
-                                         bias_n_meta_replicates = 5, bias_n_replicates = 100, bias_n_boot = 500) {
+                                         bias_n_meta_replicates = 5, bias_n_replicates = 100, bias_n_boot = 500,
+                                         cache_path = "output/concordance_null_bias_cache.csv") {
   # bias_n_meta_replicates/bias_n_replicates/bias_n_boot control the
   # cost of the BIAS MEASUREMENT step specifically -- previously
   # hardcoded to production-scale values (5 meta x 100 inner x 500
@@ -776,13 +777,24 @@ run_estimation_for_position <- function(pos, data, candidates, representative_ca
   # ask for a cheap, fast version -- it silently paid the full
   # production cost every time. Defaults preserve exact prior behavior
   # for the real battery; a test can now pass small values instead.
+  #
+  # cache_path added 2026-07-12: previously hardcoded (via
+  # get_or_compute_concordance_null_bias()'s own default) to the shared
+  # production cache with no way for a caller of THIS function to
+  # override it -- meaning every test exercising run_estimation_for_
+  # position() wrote synthetic TESTPOS-style rows straight into
+  # output/concordance_null_bias_cache.csv. Confirmed real: the
+  # production cache uploaded from the actual 2026-07-12 run already
+  # contained TESTPOS/TESTPOS_secondary entries before any of today's
+  # changes. Default preserves exact prior behavior for real battery
+  # runs; tests now pass an isolated temp path instead.
   message("  Getting ", pos, "'s concordance null bias (cached if config unchanged, representative candidate: ",
           representative_candidate_col, ")...")
   bias_est <- get_or_compute_concordance_null_bias(
     data, representative_candidate_col, position = pos,
     seasons_to_test = seasons_to_test, min_games = min_games, decay_r = decay_r, lookback_years = lookback_years,
     n_meta_replicates = bias_n_meta_replicates, n_replicates = bias_n_replicates, significance_window = significance_window,
-    n_boot = bias_n_boot, conf_level = conf_level, force_recompute = force_recompute_bias
+    n_boot = bias_n_boot, conf_level = conf_level, force_recompute = force_recompute_bias, cache_path = cache_path
   )
   null_bias <- unname(bias_est["Null_Bias"])
   cat("  ", pos, " null bias =", round(null_bias, 5), "(SE =", round(bias_est["Null_Bias_SE"], 5),
@@ -796,7 +808,7 @@ run_estimation_for_position <- function(pos, data, candidates, representative_ca
       data, secondary_representative_candidate, position = paste0(pos, "_secondary"),
       seasons_to_test = seasons_to_test, min_games = min_games, decay_r = decay_r, lookback_years = lookback_years,
       n_meta_replicates = bias_n_meta_replicates, n_replicates = bias_n_replicates, significance_window = significance_window,
-      n_boot = bias_n_boot, conf_level = conf_level, force_recompute = force_recompute_bias
+      n_boot = bias_n_boot, conf_level = conf_level, force_recompute = force_recompute_bias, cache_path = cache_path
     )
     secondary_bias <- unname(secondary_bias_est["Null_Bias"])
     cat("  ", pos, " secondary bias =", round(secondary_bias, 5), "\n")
@@ -815,11 +827,43 @@ run_estimation_for_position <- function(pos, data, candidates, representative_ca
         (ci["CI_Lower"] - null_bias) <= 0 && (ci["CI_Upper"] - null_bias) >= 0
       print_progress(i, n_cov, start_cov, paste0(pos, " coverage replicate"))
     }
-    cov_rate <- mean(covered, na.rm = TRUE)
-    cat("  ", pos, " coverage spot-check:", round(cov_rate, 3), "(nominal target:", conf_level, ")\n")
-    if (cov_rate < conf_level - 0.15) {
-      cat("  WARNING:", pos, "coverage is meaningfully below nominal -- treat its intervals with extra caution.\n")
+    n_covered <- sum(covered, na.rm = TRUE)
+    cov_rate <- n_covered / n_cov
+    # Exact (Clopper-Pearson) CI and a one-sided exact binomial test
+    # against the nominal conf_level, in place of both (a) a bare point
+    # estimate with no uncertainty reported (section 1.7: "report
+    # distributions, not adjectives") and (b) the previous fixed
+    # cov_rate < conf_level - 0.15 rule, which required cov_rate < 0.75 to
+    # fire at all and said nothing about the actual observed WR result
+    # (40/50 = 0.80). A normal-approximation CI was tried first and its
+    # two-sided 95% upper bound (0.911) still would have missed this case
+    # -- exact/one-sided is the correct tool at n=50, not a cosmetic
+    # change. p < 0.10 (not 0.05) is deliberately less stringent than a
+    # confirmatory threshold: this is a spot-check meant to flag "go run
+    # the real coverage harness," not a standalone confirmatory test.
+    bt <- binom.test(n_covered, n_cov, p = conf_level, alternative = "less")
+    cat("  ", pos, " coverage spot-check:", round(cov_rate, 3),
+        " (", n_covered, "/", n_cov, ", exact 95% CI [",
+        round(bt$conf.int[1], 3), ",", round(bt$conf.int[2], 3), "]",
+        ", one-sided p vs nominal ", conf_level, " = ", signif(bt$p.value, 3),
+        ")\n", sep = "")
+    if (bt$p.value < 0.10) {
+      cat("  WARNING:", pos, "coverage spot-check (", n_covered, "/", n_cov,
+          "=", round(cov_rate, 3), ") is significantly below the nominal",
+          conf_level, "target (one-sided p =", signif(bt$p.value, 3), ") --",
+          "treat", pos, "intervals with extra caution and do not treat this",
+          "as resolved without a full validate_bootstrap_coverage.R re-run.\n")
     }
+  }
+
+  coverage_spotcheck_result <- NULL
+  if (run_coverage_spotcheck) {
+    coverage_spotcheck_result <- list(
+      Position = pos, N_Covered = n_covered, N_Trials = n_cov,
+      Coverage_Rate = cov_rate, CI_Lower = unname(bt$conf.int[1]),
+      CI_Upper = unname(bt$conf.int[2]), P_Value_Vs_Nominal = bt$p.value,
+      Nominal_Conf_Level = conf_level, Flagged = bt$p.value < 0.10
+    )
   }
 
   rows <- list()
@@ -841,6 +885,7 @@ run_estimation_for_position <- function(pos, data, candidates, representative_ca
   numeric_cols <- setdiff(names(df), c("Position", "Stat"))
   df[numeric_cols] <- lapply(df[numeric_cols], function(x) as.numeric(as.character(x)))
   attr(df, "null_bias") <- null_bias
+  attr(df, "coverage_spotcheck") <- coverage_spotcheck_result
   df
 }
 
@@ -857,4 +902,125 @@ apply_concordance_bias_correction <- function(battery_result, null_bias) {
     Concordance_Point_Estimate_BiasCorrected = unname(battery_result["Concordance_Point_Estimate"]) - null_bias,
     Concordance_CI_Lower_BiasCorrected = unname(battery_result["Concordance_CI_Lower"]) - null_bias,
     Concordance_CI_Upper_BiasCorrected = unname(battery_result["Concordance_CI_Upper"]) - null_bias)
+}
+
+#' Groups a position's candidate stats into correlated "families" based
+#' on their raw pairwise correlation in the player-season data -- fixed
+#' 2026-07-12. This is the family-correlation matrix required by
+#' Project_Context.txt section 2.7 item 1 and WR_TE_PREREGISTRATION.md
+#' item 4 ("Build the family-correlation matrix for WR/TE from the
+#' start (not retrofitted)") before WR/TE findings could be reported --
+#' it was never implemented, and the real run's reporting listed e.g.
+#' QB's five rushing-volume candidates as five separate findings with no
+#' indication they were correlated measurements of essentially one
+#' signal (per section 1.7: "Results are reported by candidate family
+#' ... not as raw counts of individually-significant candidates").
+#'
+#' ESTIMAND: this groups candidates by correlation of their RAW STAT
+#' VALUES in the underlying player-season data (e.g. Rush_Yards_PG vs
+#' Rush_Yards), NOT by correlation of their concordance effect sizes or
+#' p-values across seasons -- the latter would require refitting every
+#' candidate across many resampled datasets to get a sampling
+#' distribution to correlate, which this project's current
+#' infrastructure does not produce. This is a real, deliberate scope
+#' limit: two candidates could plausibly be family-linked by shared
+#' mechanism without their raw values correlating strongly (e.g. if one
+#' is a rate and the other a red-zone-specific subset), and this
+#' function will not catch that. It groups by "these are numerically
+#' redundant measurements," not by "these share a hypothesized cause."
+#'
+#' NULL CANDIDATE BEHAVIOR: a candidate uncorrelated with everything
+#' else forms its own singleton family (family size 1) -- this is the
+#' expected, correct output for an independent candidate, not a failure.
+#'
+#' @param data the position's player-season data frame (e.g. qb_data)
+#' @param candidates character vector of candidate column names present in data
+#' @param method correlation method passed to stats::cor (default "spearman",
+#'   robust to the mix of count-like and rate-like stats in these candidate
+#'   lists without requiring a distributional assumption)
+#' @param threshold |r| at or above which two candidates are placed in the
+#'   same family (default 0.7 -- a conventional "strong correlation" cutoff;
+#'   this is a reporting-grouping choice, not a statistical test, and is
+#'   exposed as a parameter rather than hardcoded so it can be revisited)
+#' @return a list with:
+#'   - correlation_matrix: candidates x candidates correlation matrix
+#'     (NA for any pair involving a constant column -- cor() cannot define
+#'     a correlation with zero variance, and this is surfaced as NA rather
+#'     than erroring or silently coercing to 0)
+#'   - family_id: named integer vector, one family id per candidate,
+#'     assigned via connected components on the |r| >= threshold graph
+#'     (transitive: if A-B and B-C both clear threshold, A/B/C are one
+#'     family even if A-C alone would not have cleared it -- documented
+#'     here since it is easy to assume otherwise)
+compute_candidate_family_matrix <- function(data, candidates, method = "spearman", threshold = 0.7) {
+  missing_cols <- setdiff(candidates, names(data))
+  if (length(missing_cols) > 0) {
+    stop("compute_candidate_family_matrix: candidate column(s) not found in data: ",
+         paste(missing_cols, collapse = ", "))
+  }
+  mat <- as.matrix(data[, candidates, drop = FALSE])
+  storage.mode(mat) <- "double"
+  corr <- suppressWarnings(cor(mat, method = method, use = "pairwise.complete.obs"))
+  # cor() returns NA for any column with zero variance, rather than
+  # erroring -- but it does NOT reliably return NA for a fully-missing
+  # (all-NA) column in every R version, so make that case explicit too.
+  all_na_cols <- candidates[sapply(seq_along(candidates), function(i) all(is.na(mat[, i])))]
+  if (length(all_na_cols) > 0) {
+    corr[all_na_cols, ] <- NA
+    corr[, all_na_cols] <- NA
+  }
+
+  n <- length(candidates)
+  adjacency <- matrix(FALSE, n, n, dimnames = list(candidates, candidates))
+  adjacency[!is.na(corr) & abs(corr) >= threshold] <- TRUE
+  diag(adjacency) <- TRUE
+
+  family_id <- setNames(rep(NA_integer_, n), candidates)
+  current_family <- 0L
+  for (i in seq_len(n)) {
+    if (!is.na(family_id[i])) next
+    current_family <- current_family + 1L
+    # breadth-first traversal over the |r| >= threshold graph so
+    # transitively-linked candidates land in one family even if not
+    # every pair among them individually clears the threshold
+    frontier <- i
+    visited <- logical(n)
+    while (length(frontier) > 0) {
+      node <- frontier[1]; frontier <- frontier[-1]
+      if (visited[node]) next
+      visited[node] <- TRUE
+      family_id[node] <- current_family
+      neighbors <- which(adjacency[node, ] & !visited)
+      frontier <- c(frontier, neighbors)
+    }
+  }
+  list(correlation_matrix = corr, family_id = family_id, method = method, threshold = threshold)
+}
+
+#' Prints a compact family-correlation summary for a position's battery
+#' results (candidate name, family id, family size, and -- for families
+#' of size > 1 -- which other candidates share the family) alongside the
+#' bias-corrected concordance table, so a reader sees at a glance which
+#' "findings" are actually independent and which are the same signal
+#' counted multiple times (section 1.7's "report by family, not raw
+#' count of significant candidates").
+#'
+#' @param family_matrix_result the list returned by compute_candidate_family_matrix()
+#' @return a data frame: Stat, Family_Id, Family_Size, Family_Members (comma-joined, excludes self)
+summarize_candidate_families <- function(family_matrix_result) {
+  fam <- family_matrix_result$family_id
+  sizes <- table(fam)
+  members_str <- sapply(names(fam), function(stat) {
+    this_fam <- fam[stat]
+    peers <- setdiff(names(fam)[fam == this_fam], stat)
+    if (length(peers) == 0) "(none)" else paste(peers, collapse = ", ")
+  })
+  data.frame(
+    Stat = names(fam),
+    Family_Id = unname(fam),
+    Family_Size = as.integer(unname(sizes)[match(as.character(fam), names(sizes))]),
+    Family_Members = unname(members_str),
+    stringsAsFactors = FALSE,
+    row.names = NULL
+  )
 }

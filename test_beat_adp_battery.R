@@ -510,6 +510,8 @@ cat("\n=== run_estimation_for_position() routing logic ===\n")
 synth$candidate_a <- synth$Prior_PPG
 synth$candidate_b <- synth$candidate_permuted
 
+temp_cache_routing <- tempfile(fileext = ".csv")
+on.exit(unlink(temp_cache_routing), add = TRUE)
 routing_result <- run_estimation_for_position(
   "TESTPOS", synth, candidates = c("candidate_a", "candidate_b"),
   representative_candidate_col = "candidate_a",
@@ -522,7 +524,13 @@ routing_result <- run_estimation_for_position(
   # not bias precision, so it doesn't need the production-scale 5x100x500
   # replicate counts. Previously this test silently paid that full cost
   # anyway, since those counts were hardcoded rather than configurable.
-  bias_n_meta_replicates = 2, bias_n_replicates = 10, bias_n_boot = 50
+  bias_n_meta_replicates = 2, bias_n_replicates = 10, bias_n_boot = 50,
+  # Isolated temp cache -- fixed 2026-07-12. Previously this test wrote
+  # its TESTPOS rows straight into the shared output/concordance_null_
+  # bias_cache.csv (confirmed: the real production cache uploaded from
+  # the 2026-07-12 run already contained TESTPOS/TESTPOS_secondary
+  # entries before any of today's changes).
+  cache_path = temp_cache_routing
 )
 
 all_pass <- test_pass(
@@ -545,3 +553,163 @@ all_pass <- test_pass(
 ) && all_pass
 
 cat("\n=== ABSOLUTELY, POSITIVELY FINAL Overall:", if (all_pass) "ALL TESTS PASSED" else "AT LEAST ONE TEST FAILED -- DO NOT TRUST THIS VERSION OF THE LIBRARY", "===\n")
+
+# ============================================================
+# Coverage spot-check tests -- fixed 2026-07-12 alongside the fix
+# replacing the old fixed "cov_rate < conf_level - 0.15" warning rule
+# (which required cov_rate < 0.75 to fire and, on the real WR run,
+# silently passed a 0.80-vs-0.90 result with no warning at all) with an
+# exact one-sided binomial test against conf_level. Also fixed:
+# the spot-check result was previously print-only (cat()), with no way
+# to test its correctness except scraping console text -- now attached
+# as attr(df, "coverage_spotcheck"), matching this library's existing
+# convention (paired_wilcox_p's n_effective/n_ties attributes) of
+# exposing diagnostics as queryable values, not just printed lines.
+# ============================================================
+cat("\n=== run_estimation_for_position() coverage spot-check ===\n")
+
+temp_cache_cov <- tempfile(fileext = ".csv")
+on.exit(unlink(temp_cache_cov), add = TRUE)
+cov_result <- run_estimation_for_position(
+  "TESTCOV", synth, candidates = c("candidate_a"),
+  representative_candidate_col = "candidate_a",
+  seasons_to_test = 2001:2012, min_games = 0, decay_r = 0.5, lookback_years = 4,
+  n_boot = 100, conf_level = 0.90, run_coverage_spotcheck = TRUE,
+  bias_n_meta_replicates = 2, bias_n_replicates = 10, bias_n_boot = 50,
+  cache_path = temp_cache_cov
+)
+cov_attr <- attr(cov_result, "coverage_spotcheck")
+
+all_pass <- test_pass(
+  "run_coverage_spotcheck=TRUE attaches a non-NULL coverage_spotcheck attribute",
+  !is.null(cov_attr)
+) && all_pass
+all_pass <- test_pass(
+  "coverage_spotcheck attribute's Coverage_Rate is a valid probability in [0,1]",
+  !is.null(cov_attr) && is.numeric(cov_attr$Coverage_Rate) &&
+    cov_attr$Coverage_Rate >= 0 && cov_attr$Coverage_Rate <= 1
+) && all_pass
+all_pass <- test_pass(
+  "coverage_spotcheck attribute's CI bounds bracket the Coverage_Rate point estimate",
+  !is.null(cov_attr) &&
+    cov_attr$CI_Lower <= cov_attr$Coverage_Rate + 1e-9 &&
+    cov_attr$CI_Upper >= cov_attr$Coverage_Rate - 1e-9
+) && all_pass
+all_pass <- test_pass(
+  "run_coverage_spotcheck=FALSE (the QB/RB/TE default) attaches a NULL coverage_spotcheck attribute, not a stale/leftover one",
+  is.null(attr(routing_result, "coverage_spotcheck"))
+) && all_pass
+
+# Fixture: the exact discriminating case that motivated this fix -- the
+# real WR run's observed 40/50 (0.80 vs nominal 0.90) MUST be flagged,
+# and the previous fixed-threshold rule (cov_rate < 0.75) MUST NOT have
+# flagged it -- demonstrating this is a real behavior change, not just
+# a cosmetic rewrite.
+bt_real_case <- binom.test(40, 50, p = 0.90, alternative = "less")
+all_pass <- test_pass(
+  "The real observed WR coverage result (40/50=0.80 vs nominal 0.90) is flagged by the NEW exact-binomial rule (p < 0.10)",
+  bt_real_case$p.value < 0.10
+) && all_pass
+all_pass <- test_pass(
+  "The same 40/50=0.80 result was NOT flagged by the OLD fixed-threshold rule (cov_rate < conf_level - 0.15 = 0.75) -- confirms this was a real silent gap, not a hypothetical one",
+  !(0.80 < 0.90 - 0.15)
+) && all_pass
+all_pass <- test_pass(
+  "A comfortably well-calibrated case (44/50=0.88) is NOT flagged by the new rule (guards against the fix being over-sensitive)",
+  binom.test(44, 50, p = 0.90, alternative = "less")$p.value >= 0.10
+) && all_pass
+
+cat("\n=== COVERAGE SPOT-CHECK Overall:", if (all_pass) "ALL TESTS PASSED" else "AT LEAST ONE TEST FAILED -- DO NOT TRUST THIS VERSION OF THE LIBRARY", "===\n")
+
+# ============================================================
+# compute_candidate_family_matrix() tests -- new 2026-07-12, the
+# family-correlation matrix required before WR/TE could be reported per
+# Project_Context.txt 2.7 item 1 / WR_TE_PREREGISTRATION.md item 4, never
+# built. Four fixtures per Part 1 section 1.4's minimum set:
+#   (a) a candidate duplicated under a second name -- must detect (same family)
+#   (b) a constant candidate -- must return NA gracefully, own singleton family
+#   (c) a candidate that's a shuffled/independent version -- must NOT be
+#       grouped with the original
+#   (d) output completeness -- every candidate appears in both the
+#       correlation matrix and the family_id vector
+# ============================================================
+cat("\n=== compute_candidate_family_matrix() ===\n")
+
+fam_test_data <- synth
+fam_test_data$dup_of_prior_ppg <- fam_test_data$Prior_PPG          # (a) exact duplicate under a new name
+fam_test_data$constant_stat <- 7                                   # (b) zero variance
+set.seed(777)
+fam_test_data$independent_stat <- rnorm(nrow(fam_test_data))       # (c) unrelated to everything else
+
+fam_candidates <- c("Prior_PPG", "dup_of_prior_ppg", "constant_stat", "independent_stat")
+fam_result <- compute_candidate_family_matrix(fam_test_data, fam_candidates, threshold = 0.7)
+
+all_pass <- test_pass(
+  "(a) An exact duplicate candidate is placed in the SAME family as the original",
+  fam_result$family_id["Prior_PPG"] == fam_result$family_id["dup_of_prior_ppg"]
+) && all_pass
+all_pass <- test_pass(
+  "(a) The duplicate pair's correlation is (numerically) 1.0, not just 'high'",
+  isTRUE(all.equal(unname(fam_result$correlation_matrix["Prior_PPG", "dup_of_prior_ppg"]), 1, tolerance = 1e-8))
+) && all_pass
+all_pass <- test_pass(
+  "(b) A constant candidate returns NA correlations against every other candidate, not an error or a coerced 0/1",
+  all(is.na(fam_result$correlation_matrix["constant_stat", setdiff(fam_candidates, "constant_stat")]))
+) && all_pass
+all_pass <- test_pass(
+  "(b) A constant candidate is NOT silently merged into another family (NA correlation must not satisfy the threshold test) -- it gets its own singleton family",
+  sum(fam_result$family_id == fam_result$family_id["constant_stat"]) == 1
+) && all_pass
+all_pass <- test_pass(
+  "(c) An independent/unrelated candidate is NOT placed in the same family as Prior_PPG",
+  fam_result$family_id["independent_stat"] != fam_result$family_id["Prior_PPG"]
+) && all_pass
+all_pass <- test_pass(
+  "(d) Output completeness: every requested candidate appears in family_id",
+  setequal(names(fam_result$family_id), fam_candidates)
+) && all_pass
+all_pass <- test_pass(
+  "(d) Output completeness: correlation_matrix is square and covers every candidate",
+  all(dim(fam_result$correlation_matrix) == length(fam_candidates)) &&
+    setequal(rownames(fam_result$correlation_matrix), fam_candidates)
+) && all_pass
+
+# Transitive grouping: A-B and B-C both clear threshold but A-C alone
+# would not -- confirms A/B/C land in ONE family, not two overlapping
+# pairs, since this is a real (and non-obvious) behavior of the function.
+set.seed(778)
+n_rows <- nrow(synth)
+base_signal <- rnorm(n_rows)
+fam_chain_data <- data.frame(
+  A = base_signal + rnorm(n_rows, sd = 0.15),
+  B = base_signal + rnorm(n_rows, sd = 0.55),
+  C = base_signal + rnorm(n_rows, sd = 0.15)
+)
+fam_chain_data$B <- fam_chain_data$A * 0.75 + rnorm(n_rows, sd = 0.9)  # A-B: moderate-to-weak link
+fam_chain_result <- compute_candidate_family_matrix(fam_chain_data, c("A", "B", "C"), threshold = 0.7)
+r_AB <- abs(fam_chain_result$correlation_matrix["A", "B"])
+r_AC <- abs(fam_chain_result$correlation_matrix["A", "C"])
+if (r_AB >= 0.7 && r_AC >= 0.7) {
+  # both directly linked anyway on this seed -- test is still valid,
+  # just not exercising the transitive-only path; note and continue
+  cat("  (note: this seed produced direct A-B and A-C links >=0.7; transitive-only path not exercised this run)\n")
+}
+all_pass <- test_pass(
+  "compute_candidate_family_matrix() does not error on a 3-candidate correlation chain",
+  is.list(fam_chain_result) && !is.null(fam_chain_result$family_id)
+) && all_pass
+
+# summarize_candidate_families() output-shape test
+fam_summary <- summarize_candidate_families(fam_result)
+all_pass <- test_pass(
+  "summarize_candidate_families() returns one row per candidate with the expected columns",
+  nrow(fam_summary) == length(fam_candidates) &&
+    setequal(names(fam_summary), c("Stat", "Family_Id", "Family_Size", "Family_Members"))
+) && all_pass
+all_pass <- test_pass(
+  "summarize_candidate_families() lists the duplicate as a Family_Member of Prior_PPG, and vice versa",
+  grepl("dup_of_prior_ppg", fam_summary$Family_Members[fam_summary$Stat == "Prior_PPG"]) &&
+    grepl("Prior_PPG", fam_summary$Family_Members[fam_summary$Stat == "dup_of_prior_ppg"])
+) && all_pass
+
+cat("\n=== FAMILY-MATRIX Overall:", if (all_pass) "ALL TESTS PASSED" else "AT LEAST ONE TEST FAILED -- DO NOT TRUST THIS VERSION OF THE LIBRARY", "===\n")

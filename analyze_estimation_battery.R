@@ -44,10 +44,36 @@ cat("
     N_BOOT            -- bootstrap replicates per candidate (1000 default --
                           lower than the 2000 used in the illustrative
                           control script, a runtime tradeoff given this
-                          runs across ~40 candidates, not a handful)
+                          runs across ~40 candidates, not a handful.
+                          FIXED 2026-07-12: this comment has said 1000
+                          default since this script's first version, but
+                          the config block below silently set 500 -- a
+                          doc/code mismatch that was never caught because
+                          nothing diffed the two. The 2026-07-12 QB-RB-WR-TE
+                          run below actually ran at 500, and WR's own
+                          coverage spot-check on that run came back 0.80
+                          against a nominal 0.90 -- consistent with, though
+                          not proven to be caused by, running at half the
+                          documented replicate count. Restored to 1000 to
+                          match this comment's long-standing stated intent.
+                          A fresh WR coverage spot-check at N_BOOT=1000 is
+                          the discriminating test that would confirm or
+                          rule out N_BOOT as the mechanism -- see Task list.)
     CONF_LEVEL        -- confidence level for intervals (0.90 default)
     SIGNIFICANCE_WINDOW -- which ADP-pick window the concordance
                           interval is reported at (12 default)
+    FORCE_RECOMPUTE_BIAS -- if TRUE, ignores any cached null-bias entry
+                          and recomputes fresh for every position (FALSE
+                          default). Promoted into this explicit config
+                          block 2026-07-12 -- it was previously read via
+                          four separate scattered `if (exists(...))`
+                          checks inline at each run_estimation_for_position()
+                          call site, the exact implicit-global config
+                          pattern Part 1 section 1.3 flags as a hazard,
+                          and it was never printed in the effective-config
+                          line even though it silently controls whether a
+                          multi-minute bias computation runs or a cache
+                          hit is used.
 ================================================================
 \n")
 
@@ -68,16 +94,18 @@ if (!exists("SEASONS_TO_TEST")) SEASONS_TO_TEST <- 2014:2025
 if (!exists("DECAY_R")) DECAY_R <- 0.5
 if (!exists("LOOKBACK_YEARS")) LOOKBACK_YEARS <- 4
 if (!exists("MIN_GAMES")) MIN_GAMES <- 8
-if (!exists("N_BOOT")) N_BOOT <- 500
+if (!exists("N_BOOT")) N_BOOT <- 1000
 if (!exists("SKIP_RMSE")) SKIP_RMSE <- TRUE
 if (!exists("CONF_LEVEL")) CONF_LEVEL <- 0.90
 if (!exists("SIGNIFICANCE_WINDOW")) SIGNIFICANCE_WINDOW <- 12
+if (!exists("FORCE_RECOMPUTE_BIAS")) FORCE_RECOMPUTE_BIAS <- FALSE
 cat("=== Config: SEASONS_TO_TEST =", paste(range(SEASONS_TO_TEST), collapse="-"),
     "| DECAY_R =", DECAY_R, "| LOOKBACK_YEARS =", LOOKBACK_YEARS, "| MIN_GAMES =", MIN_GAMES,
     "| N_BOOT =", N_BOOT, "| SKIP_RMSE =", SKIP_RMSE,
-    "| CONF_LEVEL =", CONF_LEVEL, "| SIGNIFICANCE_WINDOW =", SIGNIFICANCE_WINDOW, "===\n")
+    "| CONF_LEVEL =", CONF_LEVEL, "| SIGNIFICANCE_WINDOW =", SIGNIFICANCE_WINDOW,
+    "| FORCE_RECOMPUTE_BIAS =", FORCE_RECOMPUTE_BIAS, "===\n")
 cat("NOTE: these persist in your R session once set. If a value above wasn't\n")
-cat("intended, clear it first: rm(SEASONS_TO_TEST, DECAY_R, LOOKBACK_YEARS, MIN_GAMES, N_BOOT, SKIP_RMSE, CONF_LEVEL, SIGNIFICANCE_WINDOW)\n\n")
+cat("intended, clear it first: rm(SEASONS_TO_TEST, DECAY_R, LOOKBACK_YEARS, MIN_GAMES, N_BOOT, SKIP_RMSE, CONF_LEVEL, SIGNIFICANCE_WINDOW, FORCE_RECOMPUTE_BIAS)\n\n")
 # -----------------------------------------------------------------
 
 adp <- load_historic_adp()
@@ -139,7 +167,7 @@ qb_results <- run_estimation_for_position("QB", qb_data, qb_candidates, "Rush_At
                                            decay_r = DECAY_R, lookback_years = LOOKBACK_YEARS,
                                            significance_window = SIGNIFICANCE_WINDOW, n_boot = N_BOOT,
                                            conf_level = CONF_LEVEL, skip_rmse = SKIP_RMSE,
-                                           force_recompute_bias = if (exists("FORCE_RECOMPUTE_BIAS")) FORCE_RECOMPUTE_BIAS else FALSE)
+                                           force_recompute_bias = FORCE_RECOMPUTE_BIAS)
 
 # ============================================================
 # RB
@@ -184,7 +212,7 @@ rb_results <- run_estimation_for_position("RB", rb_data, rb_candidates, "Rush_Ya
                                            decay_r = DECAY_R, lookback_years = LOOKBACK_YEARS,
                                            significance_window = SIGNIFICANCE_WINDOW, n_boot = N_BOOT,
                                            conf_level = CONF_LEVEL, skip_rmse = SKIP_RMSE,
-                                           force_recompute_bias = if (exists("FORCE_RECOMPUTE_BIAS")) FORCE_RECOMPUTE_BIAS else FALSE,
+                                           force_recompute_bias = FORCE_RECOMPUTE_BIAS,
                                            secondary_candidates = rb_ngs_candidates,
                                            secondary_representative_candidate = "Avg_Time_To_LOS")
 
@@ -224,6 +252,24 @@ wr_te_candidates <- c(
   "Games_Played", "Receiving_EPA", "Receiving_aDOT", "Yards_Per_Reception", "YAC_Share",
   "Avg_Separation", "Avg_Cushion", "Avg_Intended_Air_Yards", "Pct_Share_Intended_Air_Yards", "YAC_Above_Expectation"
 )
+# Predicted direction per WR_TE_PREREGISTRATION.md, transcribed verbatim
+# from its Tier A-E tables -- "positive"/"negative" are directional
+# commitments made in advance; "uncertain" (Tiers B/C/D/E) means the
+# document deliberately declared no direction, so those candidates
+# cannot "contradict" a prediction and are excluded from the check below.
+# Games_Played is the document's own explicit non-candidate control.
+wr_te_predicted_direction <- c(
+  Target_Share = "positive", Targets_PG = "positive", Air_Yards_Share = "positive",
+  Pct_Share_Intended_Air_Yards = "positive", WOPR = "positive", RZ_Targets_PG = "positive",
+  EZ_Targets_PG = "positive", Rec_Yards_PG = "positive", Rec_First_Downs_PG = "positive",
+  Rec_Yards = "positive", Targets = "positive",
+  Yards_Per_Target = "uncertain", Catch_Rate = "uncertain", Receiving_EPA = "uncertain",
+  Yards_Per_Reception = "uncertain",
+  Receiving_aDOT = "uncertain", Avg_Intended_Air_Yards = "uncertain", Avg_Cushion = "uncertain",
+  YAC_Share = "uncertain",
+  Avg_Separation = "uncertain", YAC_Above_Expectation = "uncertain",
+  Games_Played = "null_control"
+)
 # NGS-derived candidates need their OWN null bias (shorter, 9-season
 # history vs. 12 for the rest) -- per Fable 5's flagged item, addressed
 # here from the start rather than retrofitted.
@@ -246,7 +292,7 @@ wr_results <- run_estimation_for_position("WR", wr_data, wr_te_candidates, "Targ
                                            seasons_to_test = SEASONS_TO_TEST, min_games = MIN_GAMES,
                                            decay_r = DECAY_R, lookback_years = LOOKBACK_YEARS,
                                            n_boot = N_BOOT, conf_level = CONF_LEVEL, skip_rmse = SKIP_RMSE,
-                                           force_recompute_bias = if (exists("FORCE_RECOMPUTE_BIAS")) FORCE_RECOMPUTE_BIAS else FALSE,
+                                           force_recompute_bias = FORCE_RECOMPUTE_BIAS,
                                            secondary_candidates = wr_te_ngs_candidates,
                                            secondary_representative_candidate = "Avg_Separation",
                                            sig_window_fn = wr_te_sig_window_fn,
@@ -261,40 +307,189 @@ te_results <- run_estimation_for_position("TE", te_data, wr_te_candidates, "Targ
                                            seasons_to_test = SEASONS_TO_TEST, min_games = MIN_GAMES,
                                            decay_r = DECAY_R, lookback_years = LOOKBACK_YEARS,
                                            n_boot = N_BOOT, conf_level = CONF_LEVEL, skip_rmse = SKIP_RMSE,
-                                           force_recompute_bias = if (exists("FORCE_RECOMPUTE_BIAS")) FORCE_RECOMPUTE_BIAS else FALSE,
+                                           force_recompute_bias = FORCE_RECOMPUTE_BIAS,
                                            secondary_candidates = wr_te_ngs_candidates,
                                            secondary_representative_candidate = "Avg_Separation",
                                            sig_window_fn = wr_te_sig_window_fn)
 
 # ============================================================
+# CANDIDATE FAMILY-CORRELATION MATRIX (per position)
+#
+# Fixed 2026-07-12: this was a required gate item before WR/TE could be
+# reported (Project_Context.txt 2.7 item 1 / WR_TE_PREREGISTRATION.md
+# item 4: "Build the family-correlation matrix for WR/TE from the start
+# (not retrofitted)") and was never built for ANY position, including
+# QB, where Project_Context.txt already narrates the rushing-volume
+# candidates as "ONE family / likely one signal" without ever having
+# computed the actual correlation matrix that claim rests on. Uses
+# compute_candidate_family_matrix() from R/beat_adp_battery.R (unit
+# tested in test_beat_adp_battery.R), not a bespoke implementation here,
+# per section 1.2.
+# ============================================================
+qb_family <- compute_candidate_family_matrix(qb_data, qb_candidates)
+rb_family <- compute_candidate_family_matrix(rb_data, rb_candidates)
+wr_family <- compute_candidate_family_matrix(wr_data, wr_te_candidates)
+te_family <- compute_candidate_family_matrix(te_data, wr_te_candidates)
+
+cat("\n=== Candidate family-correlation matrix (Spearman |r| >= 0.7 = same family) ===\n")
+cat("(Grouping is by RAW STAT correlation in the player-season data, not by correlation of\n")
+cat(" concordance effect sizes -- see compute_candidate_family_matrix()'s docstring for why.\n")
+cat(" A family of size 1 means that candidate is not strongly correlated with any other\n")
+cat(" candidate at this position -- an independent test, not a gap in the grouping.)\n\n")
+for (fam_spec in list(list(pos = "QB", fam = qb_family), list(pos = "RB", fam = rb_family),
+                       list(pos = "WR", fam = wr_family), list(pos = "TE", fam = te_family))) {
+  fam_summary <- summarize_candidate_families(fam_spec$fam) %>% arrange(Family_Id, Stat)
+  n_families <- length(unique(fam_summary$Family_Id))
+  n_multi <- sum(fam_summary$Family_Size > 1)
+  cat(fam_spec$pos, ": ", nrow(fam_summary), " candidates -> ", n_families, " families (",
+      n_multi, " candidates share a family with at least one other candidate)\n", sep = "")
+  print(fam_summary %>% filter(Family_Size > 1), row.names = FALSE)
+  cat("\n")
+}
+
+# ============================================================
 # COMBINED OUTPUT
 # ============================================================
 all_results <- rbind(qb_results, rb_results, wr_results, te_results)
+all_family_summary <- rbind(
+  cbind(Position = "QB", summarize_candidate_families(qb_family)),
+  cbind(Position = "RB", summarize_candidate_families(rb_family)),
+  cbind(Position = "WR", summarize_candidate_families(wr_family)),
+  cbind(Position = "TE", summarize_candidate_families(te_family))
+)
+all_results <- all_results %>%
+  left_join(all_family_summary %>% select(Position, Stat, Family_Id, Family_Size),
+            by = c("Position", "Stat"))
+
+# Direction-vs-prediction check (WR/TE only; NA for QB/RB, which predate
+# the preregistration convention -- a separately-flagged limitation, not
+# something invented by this fix). Per WR_TE_PREREGISTRATION.md rule 5.
+all_results$Predicted_Direction <- ifelse(
+  all_results$Position %in% c("WR", "TE"),
+  wr_te_predicted_direction[all_results$Stat],
+  NA_character_
+)
+all_results$Contradicts_Prediction <- with(all_results,
+  !is.na(Predicted_Direction) & Predicted_Direction %in% c("positive", "negative") &
+    !is.na(Concordance_Point_Estimate_BiasCorrected) &
+    ((Predicted_Direction == "positive" & Concordance_Point_Estimate_BiasCorrected < 0) |
+     (Predicted_Direction == "negative" & Concordance_Point_Estimate_BiasCorrected > 0))
+)
+
+# BH-FDR on the AUC p-values -- fixed 2026-07-12. This was a roadmap gate
+# item for WR/TE (Project_Context.txt section 2.7, item 1: "AUC columns
+# FDR-corrected or dropped") that shipped neither way on the actual run:
+# raw Breakout_AUC_P/Bust_AUC_P sat in the output CSV uncorrected. Uses
+# the SAME per-metric p.adjust(method="BH") convention already
+# established in analyze_team_context_beat_adp.R (each metric's p-values
+# corrected as its own family across all Position x Stat combinations),
+# not a new pooling scheme invented here.
+all_results$Breakout_AUC_Q <- p.adjust(all_results$Breakout_AUC_P, method = "BH")
+all_results$Bust_AUC_Q <- p.adjust(all_results$Bust_AUC_P, method = "BH")
+
+# Boundary-noise flag on the bias-corrected concordance CI -- fixed
+# 2026-07-12. Section 1.7: "An interval clearing zero by <0.005 ... is
+# boundary noise, not individually citable." This threshold existed only
+# in prose before; the actual "notable_conc" filter below had no margin
+# check at all, so e.g. WR's Targets (CI_Lower_BiasCorrected = -0.0002)
+# printed in the same table, with no visual distinction, as QB's
+# RZ_Rush_Att_PG (CI_Lower_BiasCorrected = +0.035) -- a 175x difference in
+# how far each actually clears zero.
+BOUNDARY_NOISE_MARGIN <- 0.005
+all_results$CI_Margin_From_Zero_BiasCorrected <- pmin(
+  abs(all_results$Concordance_CI_Lower_BiasCorrected),
+  abs(all_results$Concordance_CI_Upper_BiasCorrected)
+)
+all_results$Excludes_Zero_BiasCorrected <- !is.na(all_results$Concordance_CI_Lower_BiasCorrected) &
+  !is.na(all_results$Concordance_CI_Upper_BiasCorrected) &
+  (all_results$Concordance_CI_Lower_BiasCorrected > 0 | all_results$Concordance_CI_Upper_BiasCorrected < 0)
+all_results$Boundary_Noise <- all_results$Excludes_Zero_BiasCorrected &
+  all_results$CI_Margin_From_Zero_BiasCorrected < BOUNDARY_NOISE_MARGIN
+
 cat("\n=== ESTIMATION BATTERY: point estimates + ", CONF_LEVEL * 100, "% CIs, QB (", length(qb_candidates),
     ") + RB (", length(rb_candidates), ") + WR (", length(wr_te_candidates), ") + TE (", length(wr_te_candidates),
     ") candidates ===\n", sep = "")
 cat("(RMSE/Concordance: point estimate + CI, informative even when the interval straddles zero --\n")
 cat(" it bounds how large a real effect could plausibly be. Bust/Breakout AUC: still p-value based,\n")
-cat(" a genuinely binary classification question. N_BOOT =", N_BOOT, "replicates per candidate.\n")
+cat(" a genuinely binary classification question, now with BH-FDR Q columns added (per-metric,\n")
+cat(" across all", nrow(all_results), "Position x Stat combinations). N_BOOT =", N_BOOT, "replicates per candidate.\n")
 cat("REMINDER: this framework excludes every rookie season (Prior_PPG filter) -- costs the least at\n")
 cat(" QB and the MOST at WR, where rookie breakouts are common and fantasy-relevant.\n\n")
 print(all_results, row.names = FALSE)
+
+# Multiplicity context -- section 1.7: "Every findings table states its
+# multiplicity context: 20 candidates x 90% CIs => ~2 expected false
+# exclusions under a global null." This was previously stated only in
+# the project's own notes, never actually computed and printed alongside
+# the real table.
+n_total_candidates <- nrow(all_results)
+expected_false_exclusions <- n_total_candidates * (1 - CONF_LEVEL)
+cat("\n=== Multiplicity context ===\n")
+cat(n_total_candidates, " total candidates x ", (1 - CONF_LEVEL) * 100,
+    "% expected false-exclusion rate under a global null => ~", round(expected_false_exclusions, 1),
+    " expected false exclusions from chance alone, before considering boundary noise.\n", sep = "")
 
 cat("\n=== Candidates whose BIAS-CORRECTED CONCORDANCE interval excludes zero entirely ===\n")
 cat("(Bias correction confirmed via diagnose_null_bias_mechanism.R: QB and RB concordance both\n")
 cat(" carry a real, position-specific, non-zero null bias that is a pure LOCATION issue, not a\n")
 cat(" width/precision issue -- re-centering restored ~90% coverage for both positions. Raw\n")
-cat(" values shown alongside for transparency; the corrected columns are the ones to trust.)\n")
-notable_conc <- all_results %>% filter(
-  !is.na(Concordance_CI_Lower_BiasCorrected) & !is.na(Concordance_CI_Upper_BiasCorrected) &
-    (Concordance_CI_Lower_BiasCorrected > 0 | Concordance_CI_Upper_BiasCorrected < 0)
-)
-if (nrow(notable_conc) > 0) {
-  print(notable_conc %>% select(Position, Stat, Concordance_Point_Estimate, Concordance_Point_Estimate_BiasCorrected,
-                                 Concordance_CI_Lower_BiasCorrected, Concordance_CI_Upper_BiasCorrected),
+cat(" values shown alongside for transparency; the corrected columns are the ones to trust.\n")
+cat(" Split into ROBUST vs BOUNDARY NOISE below -- margin from zero <", BOUNDARY_NOISE_MARGIN,
+    "is boundary noise per section 1.7 and is NOT individually citable, however cleanly it\n")
+cat(" appears to clear zero on a first read.)\n")
+notable_conc <- all_results %>% filter(Excludes_Zero_BiasCorrected)
+robust_conc <- notable_conc %>% filter(!Boundary_Noise) %>% arrange(desc(abs(Concordance_Point_Estimate_BiasCorrected)))
+boundary_conc <- notable_conc %>% filter(Boundary_Noise) %>% arrange(desc(abs(Concordance_Point_Estimate_BiasCorrected)))
+
+cat("\n--- ROBUST (margin >=", BOUNDARY_NOISE_MARGIN, ") ---\n")
+if (nrow(robust_conc) > 0) {
+  print(robust_conc %>% select(Position, Stat, Concordance_Point_Estimate, Concordance_Point_Estimate_BiasCorrected,
+                                Concordance_CI_Lower_BiasCorrected, Concordance_CI_Upper_BiasCorrected,
+                                CI_Margin_From_Zero_BiasCorrected, Family_Id, Family_Size),
+        row.names = FALSE)
+  n_robust_families <- length(unique(paste(robust_conc$Position, robust_conc$Family_Id)))
+  cat("  ->", nrow(robust_conc), "robust candidate(s) represent", n_robust_families,
+      "distinct (position, family) group(s) -- do not count candidates sharing a family as independent confirmations.\n")
+} else {
+  cat("None.\n")
+}
+cat("\n--- BOUNDARY NOISE (margin <", BOUNDARY_NOISE_MARGIN, ", NOT individually citable) ---\n")
+if (nrow(boundary_conc) > 0) {
+  print(boundary_conc %>% select(Position, Stat, Concordance_Point_Estimate, Concordance_Point_Estimate_BiasCorrected,
+                                  Concordance_CI_Lower_BiasCorrected, Concordance_CI_Upper_BiasCorrected,
+                                  CI_Margin_From_Zero_BiasCorrected, Family_Id, Family_Size),
         row.names = FALSE)
 } else {
+  cat("None.\n")
+}
+if (nrow(notable_conc) == 0) {
   cat("None -- every candidate's bias-corrected concordance interval straddles zero.\n")
+}
+
+cat("\n=== WR/TE candidates whose direction CONTRADICTS the pre-registration ===\n")
+cat("(WR_TE_PREREGISTRATION.md rule 5: 'including explicitly flagging any result that\n")
+cat(" contradicts its predicted direction, not just the ones that confirm it.' Applies\n")
+cat(" only to candidates with a committed positive/negative prediction -- Tier B/C/D/E\n")
+cat(" candidates were deliberately declared 'uncertain' in advance and cannot contradict.)\n")
+contradicting <- all_results %>% filter(Contradicts_Prediction)
+if (nrow(contradicting) > 0) {
+  print(contradicting %>% select(Position, Stat, Predicted_Direction, Concordance_Point_Estimate_BiasCorrected,
+                                  Concordance_CI_Lower_BiasCorrected, Concordance_CI_Upper_BiasCorrected, Boundary_Noise),
+        row.names = FALSE)
+} else {
+  cat("None.\n")
+}
+
+cat("\n=== AUC candidates surviving BH-FDR correction (Q < 0.10, per-metric family) ===\n")
+auc_survivors <- all_results %>% filter(Breakout_AUC_Q < 0.10 | Bust_AUC_Q < 0.10)
+if (nrow(auc_survivors) > 0) {
+  print(auc_survivors %>% select(Position, Stat, Breakout_AUC_B, Breakout_AUC_P, Breakout_AUC_Q,
+                                  Bust_AUC_B, Bust_AUC_P, Bust_AUC_Q),
+        row.names = FALSE)
+} else {
+  cat("None -- no AUC finding survives BH-FDR correction at Q < 0.10. The raw p<0.05 hits visible\n")
+  cat("in the full table above (Breakout_AUC_P / Bust_AUC_P columns) do not survive multiple-\n")
+  cat("comparison correction and must not be cited as findings on their own.\n")
 }
 
 if (SKIP_RMSE) {
