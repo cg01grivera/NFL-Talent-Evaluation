@@ -1,0 +1,5 @@
+Component,Correlation_Vs_CompositeOfOthers,Dropped
+Team_Sack_Rate_Allowed,0.489,FALSE
+Team_QB_Hit_Rate_Allowed,0.506,FALSE
+Team_Rush_Stuff_Rate,0.24,FALSE
+Team_OL_Penalty_Rate,0.147,TRUE

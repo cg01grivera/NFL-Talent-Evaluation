@@ -214,18 +214,39 @@ run_auc_cv <- function(data, candidate_col, target_col, min_train = 15, min_test
 #'   specifically so bootstrap_concordance_effect() can resample real
 #'   pair-level results, clustered by season, without re-fitting the
 #'   LOSO models from scratch.
+#' @param return_fold_coefs if TRUE, attaches the candidate's own fitted
+#'   coefficient from model_b in EVERY LOSO training fold as
+#'   attr(result, "fold_coefficients") (a named vector, Season -> coef).
+#'   This is D4a of the WR/TE anomaly resolution ladder
+#'   (WR_TE_ANOMALY_RESOLUTION_PLAN.md): a machinery-free corroboration
+#'   read for H2 -- consistently negative fold coefficients mean the
+#'   model is actively learning a mean-reversion relationship, not that
+#'   bootstrap/permutation noise is degrading an otherwise-neutral
+#'   candidate. Attached as an attribute (matching this library's
+#'   existing diagnostics-as-attributes convention, e.g. paired_wilcox_p,
+#'   coverage_spotcheck) rather than changing the return type, so
+#'   existing callers with return_fold_coefs=FALSE (the default) see
+#'   byte-identical behavior. NULL when a fold's model_b fit doesn't
+#'   include the candidate term (e.g. a rank-deficient fit) or when the
+#'   function early-returns due to insufficient data -- not silently
+#'   dropped from the vector, which would misrepresent how many folds
+#'   actually ran.
 run_concordance <- function(data, candidate_col, pair_rank_windows = c(6, 12, 18, 24),
-                             significance_window = 12, min_train = 15, return_pairs = FALSE) {
+                             significance_window = 12, min_train = 15, return_pairs = FALSE,
+                             return_fold_coefs = FALSE) {
   data <- data %>% filter(!is.na(.data[[candidate_col]]))
   seasons_present <- sort(unique(data$Season))
   if (nrow(data) < 15 || length(seasons_present) < 4) {
     out <- setNames(rep(NA_real_, length(pair_rank_windows)), paste0("Concordance_Diff_W", pair_rank_windows))
     summary_vec <- c(out, Concordance_Sig_P = NA_real_)
-    return(if (return_pairs) list(summary = summary_vec, pairs = NULL) else summary_vec)
+    result <- if (return_pairs) list(summary = summary_vec, pairs = NULL) else summary_vec
+    if (return_fold_coefs) attr(result, "fold_coefficients") <- NULL
+    return(result)
   }
   data$pred_a <- NA_real_
   data$pred_b <- NA_real_
   fmla_b <- as.formula(paste("season_ppg ~ RANK + Prior_PPG +", candidate_col))
+  fold_coefs <- if (return_fold_coefs) numeric(0) else NULL
   for (held_out in seasons_present) {
     train <- data %>% filter(Season != held_out)
     if (nrow(train) < min_train) next
@@ -234,6 +255,10 @@ run_concordance <- function(data, candidate_col, pair_rank_windows = c(6, 12, 18
     idx <- which(data$Season == held_out)
     data$pred_a[idx] <- predict(model_a, newdata = data[idx, ])
     data$pred_b[idx] <- predict(model_b, newdata = data[idx, ])
+    if (return_fold_coefs) {
+      cf <- coef(model_b)
+      fold_coefs[as.character(held_out)] <- if (candidate_col %in% names(cf)) unname(cf[candidate_col]) else NA_real_
+    }
   }
   # VECTORIZED pairwise construction (replaces a per-pair lapply()+
   # rbind() loop -- a known-slow R pattern where each rbind copies the
@@ -266,7 +291,9 @@ run_concordance <- function(data, candidate_col, pair_rank_windows = c(6, 12, 18
   if (is.null(all_pairs_df)) {
     out <- setNames(rep(NA_real_, length(pair_rank_windows)), paste0("Concordance_Diff_W", pair_rank_windows))
     summary_vec <- c(out, Concordance_Sig_P = NA_real_)
-    return(if (return_pairs) list(summary = summary_vec, pairs = NULL) else summary_vec)
+    result <- if (return_pairs) list(summary = summary_vec, pairs = NULL) else summary_vec
+    if (return_fold_coefs) attr(result, "fold_coefficients") <- fold_coefs
+    return(result)
   }
   # Concordance_Diff_W* is now (model_b - model_a): the candidate's OWN
   # incremental value, not (model_b - ADP). Concordance_Vs_ADP_W* is
@@ -288,7 +315,9 @@ run_concordance <- function(data, candidate_col, pair_rank_windows = c(6, 12, 18
               modelb_rate = mean(modelb_correct), .groups = "drop")
   p_val <- if (nrow(season_rates) >= 4) paired_wilcox_p(season_rates$modela_rate, season_rates$modelb_rate) else NA_real_
   summary_vec <- c(out, out_vs_adp, Concordance_Sig_P = p_val)
-  if (return_pairs) list(summary = summary_vec, pairs = sig_pairs) else summary_vec
+  result <- if (return_pairs) list(summary = summary_vec, pairs = sig_pairs) else summary_vec
+  if (return_fold_coefs) attr(result, "fold_coefficients") <- fold_coefs
+  result
 }
 
 #' Runs all three tests for one candidate and returns a single named
@@ -440,8 +469,19 @@ run_concordance_bootstrap <- function(data, candidate_col, significance_window =
 #'   of this function, for a number nobody is allowed to cite. Default
 #'   FALSE preserves old behavior for any caller that still wants the
 #'   (quarantined, for-the-record-only) RMSE numbers.
+#' @param return_direct_reads if TRUE, attaches attr(result,
+#'   "fold_coef_summary") (summarize_fold_coefficients() on a
+#'   return_fold_coefs=TRUE concordance fit) and attr(result,
+#'   "signal_read") (compute_candidate_signal_read()) -- TEAM_CONTEXT_
+#'   REWORK_PLAN_V2.md Section 6's direct-signal-read outputs, wired
+#'   into the battery path rather than requiring a separate diagnostic
+#'   script call. Attached as attributes, not new named-vector entries,
+#'   matching this library's existing diagnostics-as-attributes
+#'   convention -- default FALSE preserves byte-identical output for
+#'   every existing caller.
 run_full_battery_estimation <- function(data, candidate_col, significance_window = 12,
-                                          n_boot = 2000, conf_level = 0.90, skip_rmse = FALSE) {
+                                          n_boot = 2000, conf_level = 0.90, skip_rmse = FALSE,
+                                          return_direct_reads = FALSE) {
   rmse_ci <- if (skip_rmse) {
     c(Point_Estimate = NA_real_, CI_Lower = NA_real_, CI_Upper = NA_real_, N_Seasons = NA_integer_)
   } else {
@@ -451,7 +491,7 @@ run_full_battery_estimation <- function(data, candidate_col, significance_window
                                         n_boot = n_boot, conf_level = conf_level)
   breakout_res <- run_auc_cv(data, candidate_col, "is_breakout")
   bust_res <- run_auc_cv(data, candidate_col, "is_bust")
-  c(
+  result <- c(
     RMSE_Point_Estimate = unname(rmse_ci["Point_Estimate"]),
     RMSE_CI_Lower = unname(rmse_ci["CI_Lower"]),
     RMSE_CI_Upper = unname(rmse_ci["CI_Upper"]),
@@ -464,6 +504,13 @@ run_full_battery_estimation <- function(data, candidate_col, significance_window
     Bust_AUC_B = unname(bust_res["AUC_B"]),
     Bust_AUC_P = unname(bust_res["AUC_P"])
   )
+  if (return_direct_reads) {
+    fold_res <- run_concordance(data, candidate_col, significance_window = significance_window,
+                                 return_fold_coefs = TRUE)
+    attr(result, "fold_coef_summary") <- summarize_fold_coefficients(attr(fold_res, "fold_coefficients"))
+    attr(result, "signal_read") <- compute_candidate_signal_read(data, candidate_col)
+  }
+  result
 }
 
 # ============================================================
@@ -520,8 +567,21 @@ run_full_battery_estimation <- function(data, candidate_col, significance_window
 #'   existed as separate, divergence-prone copies
 #' @param seasons_to_test target seasons to build rows for
 #' @param decay_r, lookback_years decay-weighting parameters
+#' @param extra_key_col which column of `merged` (the assembled player-
+#'   season pool) identifies rows in `extra_data`. Default "norm_name"
+#'   reproduces the original player-keyed behavior byte-for-byte -- the
+#'   decay lookup is done per player. Team-context callers pass "Team":
+#'   `merged$Team` is the player's CORRECTED, historically-accurate team
+#'   for the TARGET season yr (via correct_adp_team()'s primary_team
+#'   join above, not whatever ADP originally listed), so a traded player
+#'   draws his target-season team's trailing history, not his old team's
+#'   -- and every player still on the same team in yr shares one team-
+#'   level decayed value. The join back onto `merged` always happens by
+#'   "norm_name" regardless of extra_key_col, since that's the row-level
+#'   identity key of the assembled pool; extra_key_col only changes which
+#'   column extra_data is looked up BY.
 build_position_data <- function(pos, adp, all_seasons_ppg, prior_ppg_lookup, extra_data, candidates,
-                                 seasons_to_test, decay_r, lookback_years) {
+                                 seasons_to_test, decay_r, lookback_years, extra_key_col = "norm_name") {
   rows_by_season <- list()
   for (yr in seasons_to_test) {
     end_year <- yr - 1
@@ -535,7 +595,7 @@ build_position_data <- function(pos, adp, all_seasons_ppg, prior_ppg_lookup, ext
     if (nrow(merged) < 5) next
     candidate_vals <- as.data.frame(setNames(
       lapply(candidates, function(col) {
-        decay_weighted_avg_vec(extra_data, "norm_name", col, merged$norm_name, end_year,
+        decay_weighted_avg_vec(extra_data, extra_key_col, col, merged[[extra_key_col]], end_year,
                                 year_col = "Season", r = decay_r, lookback = lookback_years)
       }), candidates
     ))
@@ -602,14 +662,130 @@ build_position_data <- function(pos, adp, all_seasons_ppg, prior_ppg_lookup, ext
 #' @param n_replicates number of independent permutations (100 default,
 #'   matching the originally validated diagnostic)
 #' @param n_boot bootstrap draws per replicate (500 default)
+#' Constructs the synthetic null-candidate column under one of two modes
+#' -- factored out of estimate_concordance_null_bias() so both modes
+#' share one code path rather than diverging copies (section 1.2).
+#'
+#' "permute" (the original mode): shuffles the candidate's own values
+#' within season. Preserves the candidate's marginal distribution;
+#' DESTROYS its correlation with RANK/Prior_PPG. This is what H1 (the
+#' WR/TE anomaly's lead hypothesis) says is collinearity-blind: it
+#' measures the concordance degradation from adding ORTHOGONAL noise to
+#' the model, which is a real measurement for an orthogonal candidate
+#' but an underestimate of the degradation for a candidate that is
+#' itself collinear with RANK/Prior_PPG (a real WR receiving-volume
+#' stat, for instance).
+#'
+#' "residual_permute" (D3's matched null): fits
+#' candidate ~ baseline_cols WITHIN EACH SEASON, permutes the
+#' RESIDUALS within season, adds back that season's fitted component.
+#' The resulting synthetic candidate carries the real candidate's exact
+#' collinearity with baseline_cols (same fitted component every
+#' replicate) while its incremental, baseline-orthogonal information is
+#' destroyed (the residual is what's permuted). If H1 is correct, this
+#' null should measure a LARGER degradation for collinear candidates
+#' than "permute" does, and the resulting bias correction should
+#' re-center corrected estimates near zero where "permute" left them
+#' negative.
+#'
+#' PER-SEASON FIT FALLBACK: a season with too few rows for a stable
+#' baseline_cols fit (fewer than length(baseline_cols)+2 observations,
+#' or a singular fit) falls back to a fit on all OTHER seasons' data
+#' instead of erroring or silently zero-filling -- this is disclosed
+#' via a one-time message per call, not silent, per section 1.5's
+#' "assert, don't assume."
+#'
+#' @param data the position's player-season data frame, already filtered
+#'   to non-NA representative_candidate_col rows
+#' @param representative_candidate_col candidate column to build a null for
+#' @param null_mode "permute" (default, original behavior) or "residual_permute" (D3)
+#' @param baseline_cols predictors for residual_permute's per-season fit
+#'   (default c("RANK","Prior_PPG"), matching model_a/model_b's shared term)
+#' @param permute_within "player" (default, original behavior: every row
+#'   is shuffled independently within season) or "team" (TEAM_CONTEXT_
+#'   REWORK_PLAN_V2.md Section 4.3): shuffles the TEAM -> VALUE mapping
+#'   within season and re-broadcasts it to every row sharing that team,
+#'   preserving the clustered tie structure a real broadcast (team-level)
+#'   candidate has -- a player-level shuffle would scatter each row
+#'   independently and destroy that clustering, understating the real
+#'   candidate's tie structure relative to its null. Only supported under
+#'   null_mode = "permute"; combining with "residual_permute" is refused
+#'   rather than silently falling back to a player-level shuffle, since
+#'   that combination has not been validated by the Gate 3 synthetic.
+#' @param team_col column identifying each row's team (default "Team"),
+#'   only consulted when permute_within = "team"
+#' @return data with a new "permuted" column (name kept for backward
+#'   compatibility with callers regardless of which mode built it)
+build_null_candidate_column <- function(data, representative_candidate_col, null_mode = "permute",
+                                         baseline_cols = c("RANK", "Prior_PPG"),
+                                         permute_within = "player", team_col = "Team") {
+  if (!permute_within %in% c("player", "team")) {
+    stop("build_null_candidate_column: permute_within must be 'player' or 'team', got: ", permute_within)
+  }
+  if (null_mode == "permute") {
+    if (permute_within == "team") {
+      return(data %>% group_by(Season) %>%
+               mutate(permuted = {
+                 vals <- .data[[representative_candidate_col]]
+                 teams <- .data[[team_col]]
+                 first_row_per_team <- !duplicated(teams)
+                 shuffled_vals <- sample(vals[first_row_per_team])
+                 lookup <- setNames(shuffled_vals, teams[first_row_per_team])
+                 unname(lookup[as.character(teams)])
+               }) %>% ungroup())
+    }
+    return(data %>% group_by(Season) %>%
+             mutate(permuted = sample(.data[[representative_candidate_col]])) %>% ungroup())
+  }
+  if (null_mode != "residual_permute") {
+    stop("build_null_candidate_column: null_mode must be 'permute' or 'residual_permute', got: ", null_mode)
+  }
+  if (permute_within == "team") {
+    stop("build_null_candidate_column: permute_within = 'team' is only supported under null_mode = 'permute' -- ",
+         "the team-broadcast + residual-permute combination is unvalidated and refused rather than silently ",
+         "falling back to a player-level shuffle.")
+  }
+
+  fmla <- as.formula(paste(representative_candidate_col, "~", paste(baseline_cols, collapse = " + ")))
+  min_obs <- length(baseline_cols) + 2
+  fallback_warned <- FALSE
+
+  data$permuted <- NA_real_
+  for (s in unique(data$Season)) {
+    idx <- which(data$Season == s)
+    sub <- data[idx, , drop = FALSE]
+    fit <- tryCatch({
+      if (nrow(sub) < min_obs) stop("too few observations")
+      lm(fmla, data = sub)
+    }, error = function(e) NULL)
+
+    if (is.null(fit)) {
+      if (!fallback_warned) {
+        message("  build_null_candidate_column: season ", s, " (and possibly others) had too few rows",
+                " for its own residual_permute fit -- falling back to a fit on all OTHER seasons' data.",
+                " (this message prints once per call)")
+        fallback_warned <- TRUE
+      }
+      fit <- lm(fmla, data = data[-idx, , drop = FALSE])
+    }
+
+    fitted_vals <- predict(fit, newdata = sub)
+    resid_vals <- sub[[representative_candidate_col]] - fitted_vals
+    data$permuted[idx] <- fitted_vals + sample(resid_vals)
+  }
+  data
+}
+
 estimate_concordance_null_bias <- function(data, representative_candidate_col, n_replicates = 100,
-                                            significance_window = 12, n_boot = 500, conf_level = 0.90) {
+                                            significance_window = 12, n_boot = 500, conf_level = 0.90,
+                                            null_mode = "permute", baseline_cols = c("RANK", "Prior_PPG"),
+                                            permute_within = "player", team_col = "Team") {
   data <- data %>% filter(!is.na(.data[[representative_candidate_col]]))
   point_ests <- numeric(n_replicates)
   start_time <- Sys.time()
   for (i in seq_len(n_replicates)) {
-    data_perm <- data %>% group_by(Season) %>%
-      mutate(permuted = sample(.data[[representative_candidate_col]])) %>% ungroup()
+    data_perm <- build_null_candidate_column(data, representative_candidate_col, null_mode, baseline_cols,
+                                              permute_within = permute_within, team_col = team_col)
     ci <- run_concordance_bootstrap(data_perm, "permuted", significance_window = significance_window,
                                      n_boot = n_boot, conf_level = conf_level)
     point_ests[i] <- ci["Point_Estimate"]
@@ -638,14 +814,17 @@ estimate_concordance_null_bias <- function(data, representative_candidate_col, n
 #'   routine use, not a re-derivation of that validated number)
 estimate_concordance_null_bias_robust <- function(data, representative_candidate_col, n_meta_replicates = 5,
                                                    n_replicates = 100, significance_window = 12,
-                                                   n_boot = 500, conf_level = 0.90) {
+                                                   n_boot = 500, conf_level = 0.90,
+                                                   null_mode = "permute", baseline_cols = c("RANK", "Prior_PPG"),
+                                                   permute_within = "player", team_col = "Team") {
   meta_estimates <- numeric(n_meta_replicates)
   start_time <- Sys.time()
   for (i in seq_len(n_meta_replicates)) {
     message("  meta-replicate ", i, " of ", n_meta_replicates, " (each running ", n_replicates, " inner replicates)...")
     res <- estimate_concordance_null_bias(data, representative_candidate_col, n_replicates = n_replicates,
                                            significance_window = significance_window, n_boot = n_boot,
-                                           conf_level = conf_level)
+                                           conf_level = conf_level, null_mode = null_mode, baseline_cols = baseline_cols,
+                                           permute_within = permute_within, team_col = team_col)
     meta_estimates[i] <- res["Null_Bias"]
     print_progress(i, n_meta_replicates, start_time, "meta-replicate")
   }
@@ -684,7 +863,9 @@ get_or_compute_concordance_null_bias <- function(data, representative_candidate_
                                                   cache_path = "output/concordance_null_bias_cache.csv",
                                                   n_meta_replicates = 5, n_replicates = 100,
                                                   significance_window = 12, n_boot = 500, conf_level = 0.90,
-                                                  force_recompute = FALSE) {
+                                                  force_recompute = FALSE,
+                                                  null_mode = "permute", baseline_cols = c("RANK", "Prior_PPG"),
+                                                  permute_within = "player", team_col = "Team") {
   # DATA FINGERPRINT (added after a confirmed real incident): the cache
   # key previously included only CONFIG parameters, not anything about
   # the data itself. Two structurally different build_position_data()
@@ -698,10 +879,22 @@ get_or_compute_concordance_null_bias <- function(data, representative_candidate_
   n_rows <- nrow(data)
   n_nonNA <- sum(!is.na(data[[representative_candidate_col]]))
 
+  # null_mode/baseline_cols added to the cache key 2026-07-12 (D3, the
+  # WR/TE anomaly matched-null): without this, a residual_permute
+  # measurement and an orthogonal-permute measurement for the exact
+  # same position/candidate/config would share one cache_key and the
+  # second call would silently reuse whichever was computed first --
+  # exactly the stale-cache hazard this cache's own docstring warns
+  # about, just via a new parameter instead of a new build script.
+  # permute_within added for the Team-Context Rework (TEAM_CONTEXT_
+  # REWORK_PLAN_V2.md Section 4.3): a player-level and a team-level
+  # permutation null are DIFFERENT MEASUREMENTS of the same candidate,
+  # not interchangeable cache hits, per CLAUDE.md's cache-hygiene
+  # invariant ("never reuse a bias across ... permutation modes").
   cache_key <- paste(position, representative_candidate_col,
                       min(seasons_to_test), max(seasons_to_test), min_games, decay_r, lookback_years,
                       n_meta_replicates, n_replicates, significance_window, n_boot, conf_level,
-                      n_rows, n_nonNA, sep = "|")
+                      n_rows, n_nonNA, null_mode, paste(baseline_cols, collapse = "+"), permute_within, sep = "|")
 
   cache <- if (file.exists(cache_path)) {
     tryCatch(readr::read_csv(cache_path, show_col_types = FALSE), error = function(e) NULL)
@@ -716,9 +909,12 @@ get_or_compute_concordance_null_bias <- function(data, representative_candidate_
   }
 
   message("  No matching cache entry (or force_recompute=TRUE) -- computing fresh ", position, " null bias",
-          " (data fingerprint: ", n_rows, " rows, ", n_nonNA, " non-NA)...")
+          " (data fingerprint: ", n_rows, " rows, ", n_nonNA, " non-NA, null_mode=", null_mode,
+          ", permute_within=", permute_within, ")...")
   fresh <- estimate_concordance_null_bias_robust(data, representative_candidate_col, n_meta_replicates,
-                                                  n_replicates, significance_window, n_boot, conf_level)
+                                                  n_replicates, significance_window, n_boot, conf_level,
+                                                  null_mode = null_mode, baseline_cols = baseline_cols,
+                                                  permute_within = permute_within, team_col = team_col)
   new_row <- data.frame(cache_key = cache_key, position = position,
                          representative_candidate = representative_candidate_col,
                          null_bias = unname(fresh["Null_Bias"]), null_bias_se = unname(fresh["Null_Bias_SE"]),
@@ -760,14 +956,30 @@ get_or_compute_concordance_null_bias <- function(data, representative_candidate_
 #'   before the main loop -- for positions with an unusually large pool
 #'   where validated calibration from other positions should not be
 #'   assumed to transfer automatically.
+#' @param permute_within "player" (default) or "team" (TEAM_CONTEXT_
+#'   REWORK_PLAN_V2.md Section 4.3) -- passed through to both the
+#'   primary/secondary bias estimation and the coverage spot-check's own
+#'   permutation, so a team-context run's null is measured the same way
+#'   throughout, never a player-level null silently applied to a
+#'   broadcast candidate.
+#' @param team_col column identifying each row's team (default "Team"),
+#'   only consulted when permute_within = "team".
+#' @param emit_direct_reads if TRUE (default, matching the prereg's
+#'   EMIT_DIRECT_READS config flag), each candidate's output row gains
+#'   fold-coefficient and per-season-Spearman direct-read summaries plus
+#'   a Method_Disagreement_Flag (TEAM_CONTEXT_REWORK_PLAN_V2.md Section
+#'   6, the YAC_Share lesson) -- see compute_method_disagreement_flag().
 run_estimation_for_position <- function(pos, data, candidates, representative_candidate_col,
                                          seasons_to_test, min_games, decay_r, lookback_years,
                                          significance_window = 12, n_boot = 500, conf_level = 0.90,
                                          skip_rmse = TRUE, force_recompute_bias = FALSE,
                                          secondary_candidates = NULL, secondary_representative_candidate = NULL,
                                          sig_window_fn = NULL, run_coverage_spotcheck = FALSE,
+                                         coverage_n_replicates = 50,
                                          bias_n_meta_replicates = 5, bias_n_replicates = 100, bias_n_boot = 500,
-                                         cache_path = "output/concordance_null_bias_cache.csv") {
+                                         cache_path = "output/concordance_null_bias_cache.csv",
+                                         permute_within = "player", team_col = "Team",
+                                         emit_direct_reads = TRUE) {
   # bias_n_meta_replicates/bias_n_replicates/bias_n_boot control the
   # cost of the BIAS MEASUREMENT step specifically -- previously
   # hardcoded to production-scale values (5 meta x 100 inner x 500
@@ -794,7 +1006,8 @@ run_estimation_for_position <- function(pos, data, candidates, representative_ca
     data, representative_candidate_col, position = pos,
     seasons_to_test = seasons_to_test, min_games = min_games, decay_r = decay_r, lookback_years = lookback_years,
     n_meta_replicates = bias_n_meta_replicates, n_replicates = bias_n_replicates, significance_window = significance_window,
-    n_boot = bias_n_boot, conf_level = conf_level, force_recompute = force_recompute_bias, cache_path = cache_path
+    n_boot = bias_n_boot, conf_level = conf_level, force_recompute = force_recompute_bias, cache_path = cache_path,
+    permute_within = permute_within, team_col = team_col
   )
   null_bias <- unname(bias_est["Null_Bias"])
   cat("  ", pos, " null bias =", round(null_bias, 5), "(SE =", round(bias_est["Null_Bias_SE"], 5),
@@ -808,7 +1021,8 @@ run_estimation_for_position <- function(pos, data, candidates, representative_ca
       data, secondary_representative_candidate, position = paste0(pos, "_secondary"),
       seasons_to_test = seasons_to_test, min_games = min_games, decay_r = decay_r, lookback_years = lookback_years,
       n_meta_replicates = bias_n_meta_replicates, n_replicates = bias_n_replicates, significance_window = significance_window,
-      n_boot = bias_n_boot, conf_level = conf_level, force_recompute = force_recompute_bias, cache_path = cache_path
+      n_boot = bias_n_boot, conf_level = conf_level, force_recompute = force_recompute_bias, cache_path = cache_path,
+      permute_within = permute_within, team_col = team_col
     )
     secondary_bias <- unname(secondary_bias_est["Null_Bias"])
     cat("  ", pos, " secondary bias =", round(secondary_bias, 5), "\n")
@@ -817,11 +1031,17 @@ run_estimation_for_position <- function(pos, data, candidates, representative_ca
   if (run_coverage_spotcheck) {
     message("  Running ", pos, " coverage spot-check (large-pool positions shouldn't assume validated\n",
             "  calibration from other positions transfers automatically)...")
-    n_cov <- 50
+    n_cov <- coverage_n_replicates
     covered <- logical(n_cov)
     start_cov <- Sys.time()
     for (i in seq_len(n_cov)) {
-      perm <- data %>% group_by(Season) %>% mutate(permuted = sample(.data[[representative_candidate_col]])) %>% ungroup()
+      # Routed through build_null_candidate_column() (rather than an
+      # inline sample()) so a team-context spot-check exercises the SAME
+      # permute_within = "team" broadcast-preserving shuffle the actual
+      # bias measurement above used -- not a player-level shuffle that
+      # would silently answer a different calibration question.
+      perm <- build_null_candidate_column(data, representative_candidate_col, null_mode = "permute",
+                                           permute_within = permute_within, team_col = team_col)
       ci <- run_concordance_bootstrap(perm, "permuted", significance_window = significance_window, n_boot = 300, conf_level = conf_level)
       covered[i] <- !is.na(ci["CI_Lower"]) && !is.na(ci["CI_Upper"]) &&
         (ci["CI_Lower"] - null_bias) <= 0 && (ci["CI_Upper"] - null_bias) >= 0
@@ -874,9 +1094,29 @@ run_estimation_for_position <- function(pos, data, candidates, representative_ca
     message("  ", pos, " x ", stat, "...")
     sig_window <- if (is.null(sig_window_fn)) significance_window else sig_window_fn(stat)
     res <- run_full_battery_estimation(data, stat, significance_window = sig_window,
-                                        n_boot = n_boot, conf_level = conf_level, skip_rmse = skip_rmse)
+                                        n_boot = n_boot, conf_level = conf_level, skip_rmse = skip_rmse,
+                                        return_direct_reads = emit_direct_reads)
+    # Direct-read attributes must be pulled off BEFORE apply_concordance_
+    # bias_correction() below, since that function's own c(battery_result,
+    # ...) construction does not preserve attributes (same reason
+    # run_full_battery_estimation() attaches them as attributes in the
+    # first place, per its own docstring -- they'd otherwise be silently
+    # dropped one call later).
+    fold_summary <- if (emit_direct_reads) attr(res, "fold_coef_summary") else NULL
+    signal_read <- if (emit_direct_reads) attr(res, "signal_read") else NULL
     bias_to_use <- if (!is.null(secondary_candidates) && stat %in% secondary_candidates) secondary_bias else null_bias
     res <- apply_concordance_bias_correction(res, bias_to_use)
+    if (emit_direct_reads) {
+      disagreement <- compute_method_disagreement_flag(
+        unname(res["Concordance_Point_Estimate_BiasCorrected"]), signal_read$mean_rho
+      )
+      res <- c(res,
+               Direct_Read_Mean_Rho = signal_read$mean_rho,
+               Direct_Read_Pct_Negative = signal_read$pct_negative,
+               Fold_Coef_Mean = fold_summary$Mean,
+               Fold_Coef_Pct_Negative = fold_summary$Pct_Negative,
+               Method_Disagreement_Flag = as.numeric(disagreement))
+    }
     rows[[stat]] <- c(Position = pos, Stat = stat, Significance_Window = sig_window, res)
     print_progress(idx, n_candidates, start_time, paste0(pos, " candidate"))
   }
@@ -1023,4 +1263,258 @@ summarize_candidate_families <- function(family_matrix_result) {
     stringsAsFactors = FALSE,
     row.names = NULL
   )
+}
+
+#' D1 of the WR/TE anomaly resolution ladder (WR_TE_ANOMALY_RESOLUTION_PLAN.md):
+#' audits a position's candidate columns for exact or near-exact
+#' duplication after build_position_data()'s decay-weighting/join, and
+#' reports per-column variance/NA/uniqueness -- specifically built to
+#' resolve TE's Target_Share/Targets_PG/WOPR raw-concordance-exactly-
+#' 0.0000 triple: are these genuinely distinct (small-pool quantization)
+#' or literally the same vector reaching the model under three names
+#' (a construction bug)?
+#'
+#' Reuses compute_candidate_family_matrix() for the pairwise correlation
+#' matrix rather than recomputing it -- per section 1.2, single source
+#' of truth -- and adds what correlation alone cannot tell you:
+#' correlation = 1 is consistent with either identical values OR
+#' different values related by an exact linear transform (y = a*x + b,
+#' a != 1). Both make two "candidates" functionally redundant for
+#' concordance purposes, but only the former is a construction bug;
+#' this function distinguishes them explicitly rather than collapsing
+#' both into one "near-duplicate" bucket.
+#'
+#' NULL/EDGE-CASE BEHAVIOR: a constant column has undefined correlation
+#' with everything (NA, via compute_candidate_family_matrix()) and is
+#' reported with N_Unique = 1 so it's visible in the audit table even
+#' though it can't appear in the identical-pairs list.
+#'
+#' @param data the position's player-season data frame
+#' @param candidates character vector of candidate column names
+#' @param identity_threshold |r| at or above which a pair is flagged for
+#'   identity inspection (default 0.999 -- deliberately stricter than
+#'   compute_candidate_family_matrix()'s default 0.7 family threshold;
+#'   D1 is asking "are these secretly the same column", not "are these
+#'   related enough to report together")
+#' @return list with:
+#'   - column_summary: data frame of Stat, Variance, N_NA, N_Unique
+#'   - identical_pairs: data frame of Stat_A, Stat_B, Correlation,
+#'     Values_Identical (TRUE = construction bug candidate; FALSE = a
+#'     genuine but perfectly-collinear pair -- still relevant to D2/H1,
+#'     not a bug by itself)
+audit_candidate_column_identity <- function(data, candidates, identity_threshold = 0.999) {
+  missing_cols <- setdiff(candidates, names(data))
+  if (length(missing_cols) > 0) {
+    stop("audit_candidate_column_identity: candidate column(s) not found in data: ",
+         paste(missing_cols, collapse = ", "))
+  }
+
+  column_summary <- do.call(rbind, lapply(candidates, function(stat) {
+    v <- data[[stat]]
+    data.frame(
+      Stat = stat,
+      Variance = if (all(is.na(v))) NA_real_ else stats::var(v, na.rm = TRUE),
+      N_NA = sum(is.na(v)),
+      N_Unique = length(unique(v[!is.na(v)])),
+      stringsAsFactors = FALSE
+    )
+  }))
+  rownames(column_summary) <- NULL
+
+  fam <- compute_candidate_family_matrix(data, candidates, threshold = identity_threshold)
+  corr <- fam$correlation_matrix
+  n <- length(candidates)
+  pairs <- list()
+  for (i in seq_len(n - 1)) {
+    for (j in seq((i + 1), n)) {
+      r <- corr[i, j]
+      if (!is.na(r) && abs(r) >= identity_threshold) {
+        stat_a <- candidates[i]; stat_b <- candidates[j]
+        va <- data[[stat_a]]; vb <- data[[stat_b]]
+        complete <- !is.na(va) & !is.na(vb)
+        values_identical <- isTRUE(all.equal(va[complete], vb[complete], tolerance = 1e-8))
+        pairs[[length(pairs) + 1]] <- data.frame(
+          Stat_A = stat_a, Stat_B = stat_b, Correlation = unname(r),
+          Values_Identical = values_identical, stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+  identical_pairs <- if (length(pairs) > 0) do.call(rbind, pairs) else
+    data.frame(Stat_A = character(0), Stat_B = character(0),
+               Correlation = numeric(0), Values_Identical = logical(0))
+
+  list(column_summary = column_summary, identical_pairs = identical_pairs)
+}
+
+#' D2 of the WR/TE anomaly resolution ladder: for each candidate,
+#' computes how much of its variance is already explained by the same
+#' baseline (RANK, Prior_PPG) that model_a and model_b both include --
+#' i.e. how collinear each candidate is with the model's existing
+#' predictors, independent of any concordance/bootstrap machinery. This
+#' is the observational signature H1 predicts: if the permutation null
+#' is collinearity-blind (see estimate_concordance_null_bias()'s
+#' docstring), candidates with high R² here should show the most
+#' negative bias-corrected concordance, and low-R² candidates should
+#' not.
+#'
+#' NULL CANDIDATE BEHAVIOR: a constant candidate has an undefined R²
+#' (regressing a constant on anything is degenerate) and returns NA,
+#' not 0 or 1 -- 0 would wrongly claim "no relationship" when the
+#' question doesn't apply, and 1 would wrongly claim total collinearity.
+#'
+#' @param data the position's player-season data frame
+#' @param candidates character vector of candidate column names
+#' @param baseline_cols predictors to regress each candidate against
+#'   (default c("RANK","Prior_PPG"), matching model_a/model_b's shared term)
+#' @return data frame: Stat, R_Squared, N_Obs (rows used for that candidate's fit)
+compute_candidate_collinearity <- function(data, candidates, baseline_cols = c("RANK", "Prior_PPG")) {
+  missing_cols <- setdiff(c(candidates, baseline_cols), names(data))
+  if (length(missing_cols) > 0) {
+    stop("compute_candidate_collinearity: column(s) not found in data: ",
+         paste(missing_cols, collapse = ", "))
+  }
+  rows <- lapply(candidates, function(stat) {
+    sub <- data[, c(stat, baseline_cols), drop = FALSE]
+    sub <- sub[stats::complete.cases(sub), , drop = FALSE]
+    n_obs <- nrow(sub)
+    if (n_obs < (length(baseline_cols) + 2) || all(sub[[stat]] == sub[[stat]][1])) {
+      return(data.frame(Stat = stat, R_Squared = NA_real_, N_Obs = n_obs, stringsAsFactors = FALSE))
+    }
+    fmla <- as.formula(paste(stat, "~", paste(baseline_cols, collapse = " + ")))
+    fit <- tryCatch(lm(fmla, data = sub), error = function(e) NULL)
+    r2 <- if (is.null(fit)) NA_real_ else summary(fit)$r.squared
+    data.frame(Stat = stat, R_Squared = r2, N_Obs = n_obs, stringsAsFactors = FALSE)
+  })
+  out <- do.call(rbind, rows)
+  rownames(out) <- NULL
+  out
+}
+
+#' Summarizes a run_concordance(..., return_fold_coefs=TRUE) result's
+#' fold_coefficients attribute -- D4a of the WR/TE anomaly resolution
+#' ladder. Consistently negative fold coefficients across seasons mean
+#' the model is actively learning a mean-reversion relationship (H2);
+#' coefficients scattered around zero mean the concordance degradation
+#' seen elsewhere is variance, not a learned signal.
+#'
+#' CAVEAT ON READING "CONSISTENCY": LOSO folds are NOT independent of
+#' each other -- any two folds share all but one season's worth of
+#' training data (e.g. 11 of 12 seasons for this project's typical
+#' pool). A real, non-zero incidental relationship in the data --
+#' including one that isn't a genuine population-level effect, just a
+#' feature of this particular sample -- will tend to show up with a
+#' consistent SIGN across most folds simply because the folds are
+#' mostly the same data, not because it's a robust, reproducible
+#' effect. Sign-consistency across folds is therefore weaker evidence
+#' than it looks; MAGNITUDE relative to a known baseline (or, better,
+#' consistency ACROSS INDEPENDENT SEASONS via compute_candidate_signal_
+#' read()'s per-season Spearman, where each season's noise realization
+#' really is independent) is the more trustworthy read. Confirmed via
+#' test_beat_adp_battery.R: a single fixed noise draw showed 11 of 12
+#' folds same-signed but at ~1/30th the magnitude of a genuine effect --
+#' sign-consistency alone would have misread that as a real relationship.
+#'
+#' @param fold_coefficients a named numeric vector (Season -> coefficient),
+#'   e.g. attr(run_concordance(..., return_fold_coefs=TRUE), "fold_coefficients")
+#' @return a list: N_Folds, N_Negative, N_Positive, Pct_Negative, Mean,
+#'   SD, Min, Max -- or all NA (N_Folds=0) if fold_coefficients is NULL
+#'   or empty, not an error
+summarize_fold_coefficients <- function(fold_coefficients) {
+  if (is.null(fold_coefficients) || length(fold_coefficients) == 0) {
+    return(list(N_Folds = 0, N_Negative = NA_integer_, N_Positive = NA_integer_,
+                Pct_Negative = NA_real_, Mean = NA_real_, SD = NA_real_,
+                Min = NA_real_, Max = NA_real_))
+  }
+  valid <- fold_coefficients[!is.na(fold_coefficients)]
+  n <- length(valid)
+  list(
+    N_Folds = n,
+    N_Negative = sum(valid < 0),
+    N_Positive = sum(valid > 0),
+    Pct_Negative = if (n > 0) sum(valid < 0) / n else NA_real_,
+    Mean = if (n > 0) mean(valid) else NA_real_,
+    SD = if (n > 1) sd(valid) else NA_real_,
+    Min = if (n > 0) min(valid) else NA_real_,
+    Max = if (n > 0) max(valid) else NA_real_
+  )
+}
+
+#' D4b of the WR/TE anomaly resolution ladder: per-season Spearman
+#' correlation between a candidate and the residual from
+#' season_ppg ~ baseline_cols -- a raw-data read with NO bootstrap, NO
+#' permutation, NO bias correction. If a candidate has real incremental
+#' signal beyond RANK/Prior_PPG, its per-season correlation with what's
+#' LEFT OVER after RANK/Prior_PPG should be consistently signed across
+#' seasons; if the concordance-level degradation is pure variance/noise,
+#' these per-season correlations should show no consistent sign.
+#'
+#' DESIGN CHOICE, stated explicitly: the residual is computed from ONE
+#' baseline fit pooled across all seasons (not fit per-season) -- this
+#' is deliberately the simplest possible construction, matching D4's
+#' "machinery-free" purpose. A per-season baseline fit is a reasonable
+#' alternative but is not what this function does; do not assume it.
+#'
+#' NULL/EDGE-CASE BEHAVIOR: a season with fewer than 3 non-NA rows for
+#' the candidate, or a constant candidate within that season, returns
+#' NA for that season's Spearman rho (correlation is undefined/unstable
+#' below that), not an error and not a 0 that would misrepresent "no
+#' relationship" as a real measurement.
+#'
+#' @param data the position's player-season data frame
+#' @param candidate_col candidate column to correlate against the residual
+#' @param baseline_cols predictors for the pooled residual fit (default
+#'   c("RANK","Prior_PPG"), matching model_a's term)
+#' @return list with:
+#'   - by_season: data frame of Season, N, Spearman_Rho
+#'   - n_seasons_negative, n_seasons_positive, pct_negative, mean_rho
+compute_candidate_signal_read <- function(data, candidate_col, baseline_cols = c("RANK", "Prior_PPG")) {
+  data <- data %>% filter(!is.na(.data[[candidate_col]]))
+  fmla <- as.formula(paste("season_ppg ~", paste(baseline_cols, collapse = " + ")))
+  fit <- lm(fmla, data = data)
+  data$.resid <- data$season_ppg - predict(fit, newdata = data)
+
+  by_season <- data %>%
+    group_by(Season) %>%
+    summarise(
+      N = dplyr::n(),
+      Spearman_Rho = if (dplyr::n() >= 3 && stats::var(.data[[candidate_col]]) > 0)
+        suppressWarnings(cor(.data[[candidate_col]], .data[[".resid"]], method = "spearman")) else NA_real_,
+      .groups = "drop"
+    )
+
+  valid_rho <- by_season$Spearman_Rho[!is.na(by_season$Spearman_Rho)]
+  list(
+    by_season = as.data.frame(by_season),
+    n_seasons_negative = sum(valid_rho < 0),
+    n_seasons_positive = sum(valid_rho > 0),
+    pct_negative = if (length(valid_rho) > 0) sum(valid_rho < 0) / length(valid_rho) else NA_real_,
+    mean_rho = if (length(valid_rho) > 0) mean(valid_rho) else NA_real_
+  )
+}
+
+#' Method-disagreement flag between concordance's bias-corrected sign
+#' and the direct per-season-Spearman signal read's sign -- TEAM_CONTEXT_
+#' REWORK_PLAN_V2.md Section 6, the YAC_Share lesson: two independent
+#' measurement approaches (bootstrap concordance vs. a machinery-free
+#' raw-data correlation) disagreeing on DIRECTION means the candidate
+#' cannot be reported as supported in either direction until reconciled,
+#' regardless of how confident either measurement looks on its own.
+#'
+#' "Nominally non-trivial" (the plan's phrase) is operationalized here as
+#' both signs being DEFINED (non-NA) and NON-ZERO -- a flag can only fire
+#' when there are two actual, opposite directional claims to disagree
+#' with each other. A zero or NA on either side means one side has no
+#' directional claim at all, so there is nothing to conflict with.
+#'
+#' @param concordance_estimate the BIAS-CORRECTED concordance point
+#'   estimate (Concordance_Point_Estimate_BiasCorrected), not the raw one
+#'   -- the corrected number is what gets reported/compared against zero
+#' @param direct_read_mean_rho compute_candidate_signal_read()'s mean_rho
+#' @return TRUE if flagged, FALSE otherwise -- never NA, so this is
+#'   always safe to use directly as a data.frame column or filter
+compute_method_disagreement_flag <- function(concordance_estimate, direct_read_mean_rho) {
+  conc_sign <- sign(concordance_estimate)
+  read_sign <- sign(direct_read_mean_rho)
+  isTRUE(!is.na(conc_sign) && !is.na(read_sign) && conc_sign != 0 && read_sign != 0 && conc_sign != read_sign)
 }

@@ -49,6 +49,46 @@ library(dplyr)
 #'   4th down aggressiveness = share of 4th-down plays where the team
 #'                            ran or passed instead of punting/kicking a FG
 #'
+#' TEAM-CONTEXT REWORK V2 ADDITIONS (Gate 2, TEAM_CONTEXT_REWORK_PLAN_V2.md
+#' Section 3.1/5) -- every column below re-verified live against a fresh
+#' 2023 nflreadr::load_pbp() pull before coding, per this file's own
+#' standing convention:
+#'   Team_Sack_Rate_Allowed   = sack==1 share of dropbacks (dropback =
+#'                            play_type=="pass" | sack==1, the SAME
+#'                            denominator as Team_EPA_Per_Dropback above,
+#'                            reusing `pass_plays` rather than a second
+#'                            dropback definition). Confirmed live: sack
+#'                            and qb_hit are both NA-free within this set.
+#'   Team_QB_Hit_Rate_Allowed = qb_hit==1 share of the same dropback set.
+#'   Team_Rush_Stuff_Rate    = share of DESIGNED rushes (play_type=="run"
+#'                            AND qb_scramble==0 -- confirmed live:
+#'                            qb_scramble is a clean 0/1 flag with zero NA
+#'                            on every play_type=="run" row) with
+#'                            yards_gained<=0. Confirmed live: yards_gained
+#'                            has zero NA within this designed-rush set.
+#'   Team_Shotgun_Rate       = shotgun==1 share of "called" plays
+#'                            (play_type %in% c("pass","run")). Confirmed
+#'                            live: shotgun is a clean 0/1 flag, zero NA,
+#'                            across every play_type.
+#'   Team_Goal_To_Go_Pass_Rate,
+#'   Team_Goal_To_Go_Run_Rate = pass (resp. run) share of called plays
+#'                            (play_type %in% c("pass","run")) where
+#'                            goal_to_go==1 -- i.e. this team's OWN
+#'                            propensity to pass vs. run once it reaches
+#'                            a goal-to-go situation, not a share of all
+#'                            offensive snaps. Confirmed live: goal_to_go
+#'                            is a clean 0/1 flag, zero NA, and matches
+#'                            ydstogo==yardline_100 EXACTLY (no
+#'                            discrepancies) in a 2023 pull -- a fully
+#'                            trustworthy column, not a guessed proxy.
+#'                            These two rates are complementary by
+#'                            construction (same numerator play_type
+#'                            split, same denominator) and are reported
+#'                            as separate named columns because the
+#'                            exploratory tier and the C5 mechanism-
+#'                            consistency check each reference only one
+#'                            of the two.
+#'
 #' @param season the season to fetch
 #' @param pbp optional pre-loaded play-by-play, for sharing across calls
 #' @param weekly_stats optional pre-loaded weekly player stats (needed
@@ -73,13 +113,20 @@ fetch_team_context_stats <- function(season, pbp = NULL, weekly_stats = NULL) {
       Deep_Attempts         = sum(pass_length == "deep", na.rm = TRUE),
       Deep_Completions      = sum(pass_length == "deep" & complete_pass == 1, na.rm = TRUE),
       Total_Attempts        = sum(play_type == "pass", na.rm = TRUE),
+      # Reuses this SAME dropback set (pass_plays) for the OL sack/hit
+      # components -- "same denominator as Team_EPA_Per_Dropback" per
+      # TEAM_CONTEXT_REWORK_PLAN_V2.md Section 3.1, not a second,
+      # possibly-divergent dropback definition.
+      Team_Sack_Rate_Allowed   = mean(sack == 1, na.rm = TRUE),
+      Team_QB_Hit_Rate_Allowed = mean(qb_hit == 1, na.rm = TRUE),
       .groups = "drop"
     ) %>%
     mutate(
       Team_Deep_Attempt_Pct    = ifelse(Total_Attempts > 0, Deep_Attempts / Total_Attempts, NA_real_),
       Team_Deep_Completion_Pct = ifelse(Deep_Attempts > 0, Deep_Completions / Deep_Attempts, NA_real_)
     ) %>%
-    select(Team, Team_EPA_Per_Dropback, Team_CPOE, Team_aDOT, Team_Deep_Attempt_Pct, Team_Deep_Completion_Pct)
+    select(Team, Team_EPA_Per_Dropback, Team_CPOE, Team_aDOT, Team_Deep_Attempt_Pct, Team_Deep_Completion_Pct,
+           Team_Sack_Rate_Allowed, Team_QB_Hit_Rate_Allowed)
 
   # ---- Game script (leading/trailing snap share) ----
   game_script <- offense_plays %>%
@@ -221,6 +268,54 @@ fetch_team_context_stats <- function(season, pbp = NULL, weekly_stats = NULL) {
     mutate(Team_Raw_Plays_PG = raw_plays / team_games) %>%
     select(Team, Team_PROE, Team_Raw_Plays_PG)
 
+  # ---- Rush stuff rate (designed rushes only) -- excludes qb_scramble
+  # so a QB's own scramble decision-making doesn't get attributed to the
+  # OL/run-blocking construct this stat feeds (TEAM_CONTEXT_REWORK_PLAN_
+  # V2.md Section 3.1's declared contamination boundary).
+  designed_rushes <- offense_plays %>% filter(play_type == "run", qb_scramble == 0)
+  rush_stuff_stats <- designed_rushes %>%
+    group_by(Team = posteam) %>%
+    summarise(
+      Stuffed_Rushes = sum(yards_gained <= 0, na.rm = TRUE),
+      Total_Rushes   = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(Team_Rush_Stuff_Rate = ifelse(Total_Rushes > 0, Stuffed_Rushes / Total_Rushes, NA_real_)) %>%
+    select(Team, Team_Rush_Stuff_Rate)
+
+  # ---- Shotgun rate, over "called" plays (play_type %in% c("pass","run")) --
+  # the same real-play denominator convention this file already uses
+  # elsewhere (e.g. the pace stats' raw_plays/neutral sets), not every raw
+  # pbp row (kickoffs, punts, kneels, etc. carry no real formation signal).
+  called_plays <- offense_plays %>% filter(play_type %in% c("pass", "run"))
+  shotgun_stats <- called_plays %>%
+    group_by(Team = posteam) %>%
+    summarise(
+      Shotgun_Plays       = sum(shotgun == 1, na.rm = TRUE),
+      Total_Called_Plays  = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(Team_Shotgun_Rate = ifelse(Total_Called_Plays > 0, Shotgun_Plays / Total_Called_Plays, NA_real_)) %>%
+    select(Team, Team_Shotgun_Rate)
+
+  # ---- Goal-to-go pass/run split -- this team's OWN propensity to pass
+  # vs. run once it reaches goal_to_go==1, not a share of all offensive
+  # snaps (see the docstring above for the C5 mechanism-consistency use).
+  goal_to_go_plays <- offense_plays %>% filter(goal_to_go == 1, play_type %in% c("pass", "run"))
+  goal_to_go_stats <- goal_to_go_plays %>%
+    group_by(Team = posteam) %>%
+    summarise(
+      GTG_Pass_Plays  = sum(play_type == "pass", na.rm = TRUE),
+      GTG_Run_Plays   = sum(play_type == "run", na.rm = TRUE),
+      Total_GTG_Plays = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Team_Goal_To_Go_Pass_Rate = ifelse(Total_GTG_Plays > 0, GTG_Pass_Plays / Total_GTG_Plays, NA_real_),
+      Team_Goal_To_Go_Run_Rate  = ifelse(Total_GTG_Plays > 0, GTG_Run_Plays / Total_GTG_Plays, NA_real_)
+    ) %>%
+    select(Team, Team_Goal_To_Go_Pass_Rate, Team_Goal_To_Go_Run_Rate)
+
   passing_stats %>%
     full_join(game_script,        by = "Team") %>%
     full_join(penalty_stats,      by = "Team") %>%
@@ -229,6 +324,9 @@ fetch_team_context_stats <- function(season, pbp = NULL, weekly_stats = NULL) {
     full_join(drive_stats,        by = "Team") %>%
     full_join(target_share_stats, by = "Team") %>%
     full_join(pace_stats,         by = "Team") %>%
+    full_join(rush_stuff_stats,   by = "Team") %>%
+    full_join(shotgun_stats,      by = "Team") %>%
+    full_join(goal_to_go_stats,   by = "Team") %>%
     mutate(Season = season) %>%
     as.data.frame()
 }

@@ -1,0 +1,9 @@
+Stat,Family_Id,Family_Size,Family_Members,Position
+Team_Sack_Rate_Allowed,1,1,(none),QB
+Team_QB_Hit_Rate_Allowed,2,1,(none),QB
+Team_Rush_Stuff_Rate,1,1,(none),RB
+Team_RZ_Trip_Rate,2,1,(none),RB
+Team_Sack_Rate_Allowed,1,1,(none),WR
+Team_QB_Hit_Rate_Allowed,2,1,(none),WR
+Team_Sack_Rate_Allowed,1,1,(none),TE
+Team_QB_Hit_Rate_Allowed,2,1,(none),TE

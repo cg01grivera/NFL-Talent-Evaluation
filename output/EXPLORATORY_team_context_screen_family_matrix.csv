@@ -1,0 +1,105 @@
+Stat,Family_Id,Family_Size,Family_Members,Position
+Team_EPA_Per_Dropback,1,7,"Team_CPOE, Team_Deep_Completion_Pct, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",QB
+Team_CPOE,1,7,"Team_EPA_Per_Dropback, Team_Deep_Completion_Pct, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",QB
+Team_aDOT,2,2,Team_Deep_Attempt_Pct,QB
+Team_Deep_Attempt_Pct,2,2,Team_aDOT,QB
+Team_Deep_Completion_Pct,1,7,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",QB
+Team_Sack_Rate_Allowed,3,1,(none),QB
+Team_QB_Hit_Rate_Allowed,4,1,(none),QB
+Team_Leading_Snap_Pct,1,7,"Team_EPA_Per_Dropback, Team_CPOE, Team_Deep_Completion_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",QB
+Team_Trailing_Snap_Pct,1,7,"Team_EPA_Per_Dropback, Team_CPOE, Team_Deep_Completion_Pct, Team_Leading_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",QB
+Team_OL_Penalty_Rate,5,1,(none),QB
+Team_4th_Down_Aggressiveness,6,1,(none),QB
+Team_Weekly_EPA_Variance,7,1,(none),QB
+Team_Weekly_Points_Variance,8,1,(none),QB
+Team_Three_And_Out_Rate,9,1,(none),QB
+Team_Scoring_Drive_Rate,1,7,"Team_EPA_Per_Dropback, Team_CPOE, Team_Deep_Completion_Pct, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_TD_Drive_Rate",QB
+Team_TD_Drive_Rate,1,7,"Team_EPA_Per_Dropback, Team_CPOE, Team_Deep_Completion_Pct, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate",QB
+Team_Avg_Plays_Per_Drive,10,1,(none),QB
+Team_Avg_Starting_Field_Pos,11,1,(none),QB
+Team_TE_Target_Share,12,1,(none),QB
+Team_WR_Target_Share,13,1,(none),QB
+Team_RB_Target_Share,14,1,(none),QB
+Team_PROE,15,1,(none),QB
+Team_Raw_Plays_PG,16,1,(none),QB
+Team_Rush_Stuff_Rate,17,1,(none),QB
+Team_Shotgun_Rate,18,1,(none),QB
+Team_Goal_To_Go_Pass_Rate,19,1,(none),QB
+Team_EPA_Per_Dropback,1,8,"Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",RB
+Team_CPOE,1,8,"Team_EPA_Per_Dropback, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",RB
+Team_aDOT,2,2,Team_Deep_Attempt_Pct,RB
+Team_Deep_Attempt_Pct,2,2,Team_aDOT,RB
+Team_Deep_Completion_Pct,3,1,(none),RB
+Team_Sack_Rate_Allowed,4,1,(none),RB
+Team_QB_Hit_Rate_Allowed,5,1,(none),RB
+Team_Leading_Snap_Pct,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",RB
+Team_Trailing_Snap_Pct,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",RB
+Team_OL_Penalty_Rate,6,1,(none),RB
+Team_4th_Down_Aggressiveness,7,1,(none),RB
+Team_Weekly_EPA_Variance,8,1,(none),RB
+Team_Weekly_Points_Variance,9,1,(none),RB
+Team_Three_And_Out_Rate,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",RB
+Team_Scoring_Drive_Rate,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",RB
+Team_TD_Drive_Rate,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_Avg_Plays_Per_Drive",RB
+Team_Avg_Plays_Per_Drive,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",RB
+Team_Avg_Starting_Field_Pos,10,1,(none),RB
+Team_TE_Target_Share,11,1,(none),RB
+Team_WR_Target_Share,12,1,(none),RB
+Team_RB_Target_Share,13,1,(none),RB
+Team_PROE,14,1,(none),RB
+Team_Raw_Plays_PG,15,1,(none),RB
+Team_Rush_Stuff_Rate,16,1,(none),RB
+Team_Shotgun_Rate,17,1,(none),RB
+Team_Goal_To_Go_Pass_Rate,18,1,(none),RB
+Team_EPA_Per_Dropback,1,8,"Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",WR
+Team_CPOE,1,8,"Team_EPA_Per_Dropback, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",WR
+Team_aDOT,2,2,Team_Deep_Attempt_Pct,WR
+Team_Deep_Attempt_Pct,2,2,Team_aDOT,WR
+Team_Deep_Completion_Pct,3,1,(none),WR
+Team_Sack_Rate_Allowed,4,1,(none),WR
+Team_QB_Hit_Rate_Allowed,5,1,(none),WR
+Team_Leading_Snap_Pct,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",WR
+Team_Trailing_Snap_Pct,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",WR
+Team_OL_Penalty_Rate,6,1,(none),WR
+Team_4th_Down_Aggressiveness,7,1,(none),WR
+Team_Weekly_EPA_Variance,8,1,(none),WR
+Team_Weekly_Points_Variance,9,1,(none),WR
+Team_Three_And_Out_Rate,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",WR
+Team_Scoring_Drive_Rate,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_TD_Drive_Rate, Team_Avg_Plays_Per_Drive",WR
+Team_TD_Drive_Rate,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_Avg_Plays_Per_Drive",WR
+Team_Avg_Plays_Per_Drive,1,8,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Three_And_Out_Rate, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",WR
+Team_Avg_Starting_Field_Pos,10,1,(none),WR
+Team_TE_Target_Share,11,1,(none),WR
+Team_WR_Target_Share,12,1,(none),WR
+Team_RB_Target_Share,13,1,(none),WR
+Team_PROE,14,1,(none),WR
+Team_Raw_Plays_PG,15,1,(none),WR
+Team_Rush_Stuff_Rate,16,1,(none),WR
+Team_Shotgun_Rate,17,1,(none),WR
+Team_Goal_To_Go_Pass_Rate,18,1,(none),WR
+Team_EPA_Per_Dropback,1,7,"Team_CPOE, Team_Deep_Completion_Pct, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",TE
+Team_CPOE,1,7,"Team_EPA_Per_Dropback, Team_Deep_Completion_Pct, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",TE
+Team_aDOT,2,2,Team_Deep_Attempt_Pct,TE
+Team_Deep_Attempt_Pct,2,2,Team_aDOT,TE
+Team_Deep_Completion_Pct,1,7,"Team_EPA_Per_Dropback, Team_CPOE, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",TE
+Team_Sack_Rate_Allowed,3,1,(none),TE
+Team_QB_Hit_Rate_Allowed,4,1,(none),TE
+Team_Leading_Snap_Pct,1,7,"Team_EPA_Per_Dropback, Team_CPOE, Team_Deep_Completion_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",TE
+Team_Trailing_Snap_Pct,1,7,"Team_EPA_Per_Dropback, Team_CPOE, Team_Deep_Completion_Pct, Team_Leading_Snap_Pct, Team_Scoring_Drive_Rate, Team_TD_Drive_Rate",TE
+Team_OL_Penalty_Rate,5,1,(none),TE
+Team_4th_Down_Aggressiveness,6,1,(none),TE
+Team_Weekly_EPA_Variance,7,1,(none),TE
+Team_Weekly_Points_Variance,8,1,(none),TE
+Team_Three_And_Out_Rate,9,1,(none),TE
+Team_Scoring_Drive_Rate,1,7,"Team_EPA_Per_Dropback, Team_CPOE, Team_Deep_Completion_Pct, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_TD_Drive_Rate",TE
+Team_TD_Drive_Rate,1,7,"Team_EPA_Per_Dropback, Team_CPOE, Team_Deep_Completion_Pct, Team_Leading_Snap_Pct, Team_Trailing_Snap_Pct, Team_Scoring_Drive_Rate",TE
+Team_Avg_Plays_Per_Drive,10,1,(none),TE
+Team_Avg_Starting_Field_Pos,11,1,(none),TE
+Team_TE_Target_Share,12,1,(none),TE
+Team_WR_Target_Share,13,1,(none),TE
+Team_RB_Target_Share,14,1,(none),TE
+Team_PROE,15,1,(none),TE
+Team_Raw_Plays_PG,16,1,(none),TE
+Team_Rush_Stuff_Rate,17,1,(none),TE
+Team_Shotgun_Rate,18,1,(none),TE
+Team_Goal_To_Go_Pass_Rate,19,1,(none),TE

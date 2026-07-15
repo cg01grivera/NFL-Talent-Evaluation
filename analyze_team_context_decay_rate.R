@@ -44,20 +44,35 @@ source("R/decay_test_utils.R")
 if (!exists("SEASONS_TO_TEST")) SEASONS_TO_TEST <- 2012:2025
 if (!exists("R_GRID")) R_GRID <- c(1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1)
 if (!exists("LOOKBACK_YEARS")) LOOKBACK_YEARS <- 4
+if (!exists("GATE_R")) GATE_R <- 0.5              # the project's standard decay rate -- the Gate 4 /
+                                                    # Rule 8 persistence-gate DECISION is read at this
+                                                    # fixed r, not the grid-searched "best r", to avoid
+                                                    # r-cherry-picking (no goal-seeking, CLAUDE.md #5)
+if (!exists("PERSISTENCE_GATE")) PERSISTENCE_GATE <- 0.30
 cat("=== Config: SEASONS_TO_TEST =", paste(range(SEASONS_TO_TEST), collapse="-"),
-    "| LOOKBACK_YEARS =", LOOKBACK_YEARS, "===\n")
+    "| LOOKBACK_YEARS =", LOOKBACK_YEARS, "| GATE_R =", GATE_R,
+    "| PERSISTENCE_GATE =", PERSISTENCE_GATE, "===\n")
 cat("NOTE: these persist in your R session once set. If a value above wasn't\n")
-cat("intended, clear it first: rm(SEASONS_TO_TEST, R_GRID, LOOKBACK_YEARS)\n\n")
+cat("intended, clear it first: rm(SEASONS_TO_TEST, R_GRID, LOOKBACK_YEARS, GATE_R, PERSISTENCE_GATE)\n\n")
 # -----------------------------------------------------------------
 
-message("Building team-context stats for ", min(SEASONS_TO_TEST), "-", max(SEASONS_TO_TEST),
-        " -- one full pbp pull per season, expect this to take a while...")
-team_context_by_season <- list()
-for (yr in SEASONS_TO_TEST) {
-  message("  ", yr, "...")
-  team_context_by_season[[as.character(yr)]] <- fetch_team_context_stats(yr)
+# Reuses a pre-fetched panel if the caller already built one
+# (GATE4_TEAM_CONTEXT_FULL) -- avoids re-pulling 14 seasons of pbp when
+# this script runs alongside analyze_ol_composite_validation.R and the
+# HC-continuity split in the same Gate 4 session.
+if (exists("GATE4_TEAM_CONTEXT_FULL")) {
+  team_context_full <- GATE4_TEAM_CONTEXT_FULL
+  cat("Reusing pre-fetched team_context_full (", nrow(team_context_full), "rows )\n\n")
+} else {
+  message("Building team-context stats for ", min(SEASONS_TO_TEST), "-", max(SEASONS_TO_TEST),
+          " -- one full pbp pull per season, expect this to take a while...")
+  team_context_by_season <- list()
+  for (yr in SEASONS_TO_TEST) {
+    message("  ", yr, "...")
+    team_context_by_season[[as.character(yr)]] <- fetch_team_context_stats(yr)
+  }
+  team_context_full <- do.call(rbind, team_context_by_season)
 }
-team_context_full <- do.call(rbind, team_context_by_season)
 cat("Total team-season rows:", nrow(team_context_full), "across", length(SEASONS_TO_TEST), "seasons\n\n")
 
 stat_cols <- setdiff(names(team_context_full), c("Team", "Season"))
@@ -65,13 +80,20 @@ cat("Testing", length(stat_cols), "team-context stats:\n")
 cat(paste(" -", stat_cols, collapse = "\n"), "\n\n")
 
 message("Running the decay-rate grid...")
+r_gate_idx <- which(R_GRID == GATE_R)
 results <- list()
 for (stat in stat_cols) {
   message("  ", stat, "...")
   res <- test_decay_rates(team_context_full, "Team", stat, "Season", R_GRID, LOOKBACK_YEARS)
   best_idx <- which.max(res$correlations)
+  gate_r_corr <- round(res$correlations[r_gate_idx], 3)
   results[[stat]] <- data.frame(
     Stat = stat,
+    # The Gate 4 / Rule 8 DECISION column -- read at the project's fixed
+    # standard decay rate (GATE_R, default 0.5), not the grid-searched
+    # "best r" below (which is diagnostic context only, not the gate).
+    GateR_Correlation = gate_r_corr,
+    Persistence_Gate_Pass = !is.na(gate_r_corr) & gate_r_corr >= PERSISTENCE_GATE,
     Best_R = if (length(best_idx) > 0) R_GRID[best_idx] else NA,
     Best_Correlation = if (length(best_idx) > 0) round(res$correlations[best_idx], 3) else NA,
     Flat_Avg_Correlation = round(res$correlations[which(R_GRID == 1.0)], 3),
@@ -81,10 +103,19 @@ for (stat in stat_cols) {
 }
 summary_df <- do.call(rbind, results)
 rownames(summary_df) <- NULL
-summary_df <- summary_df[order(-summary_df$Best_Correlation), ]
+summary_df <- summary_df[order(-summary_df$GateR_Correlation), ]
 
-cat("\n=== Team-context persistence, ranked best to worst ===\n")
+cat("\n=== Team-context persistence, ranked by the r=", GATE_R, " gate correlation ===\n", sep = "")
 print(summary_df, row.names = FALSE)
+
+new_stats <- c("Team_Sack_Rate_Allowed", "Team_QB_Hit_Rate_Allowed", "Team_Rush_Stuff_Rate",
+               "Team_Shotgun_Rate", "Team_Goal_To_Go_Pass_Rate", "Team_Goal_To_Go_Run_Rate")
+new_stats_present <- intersect(new_stats, summary_df$Stat)
+if (length(new_stats_present) > 0) {
+  cat("\n=== Gate 4 / Rule 8: the six new Team-Context Rework V2 stats specifically ===\n")
+  print(summary_df[summary_df$Stat %in% new_stats_present, c("Stat", "GateR_Correlation", "Persistence_Gate_Pass", "N_Pairs")],
+        row.names = FALSE)
+}
 
 dir.create("output", showWarnings = FALSE)
 readr::write_csv(summary_df, "output/analyze_team_context_decay_rate_results.csv")

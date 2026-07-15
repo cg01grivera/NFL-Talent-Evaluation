@@ -1,0 +1,17 @@
+Position,Stat,Era,Point_Estimate_BiasCorrected,N_Seasons
+QB,Team_Sack_Rate_Allowed,exploratory,0.0442,6
+QB,Team_Sack_Rate_Allowed,confirmation,0.0123,6
+QB,Team_QB_Hit_Rate_Allowed,exploratory,0.0234,6
+QB,Team_QB_Hit_Rate_Allowed,confirmation,-0.0294,6
+RB,Team_Rush_Stuff_Rate,exploratory,0.0037,6
+RB,Team_Rush_Stuff_Rate,confirmation,0.0438,6
+RB,Team_RZ_Trip_Rate,exploratory,-0.0055,6
+RB,Team_RZ_Trip_Rate,confirmation,0.0152,6
+WR,Team_Sack_Rate_Allowed,exploratory,0.0063,6
+WR,Team_Sack_Rate_Allowed,confirmation,-0.0071,6
+WR,Team_QB_Hit_Rate_Allowed,exploratory,0.0141,6
+WR,Team_QB_Hit_Rate_Allowed,confirmation,-0.0125,6
+TE,Team_Sack_Rate_Allowed,exploratory,0.0073,6
+TE,Team_Sack_Rate_Allowed,confirmation,0.0091,6
+TE,Team_QB_Hit_Rate_Allowed,exploratory,0.0186,6
+TE,Team_QB_Hit_Rate_Allowed,confirmation,0.0091,6

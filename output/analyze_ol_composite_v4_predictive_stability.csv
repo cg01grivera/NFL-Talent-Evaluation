@@ -1,0 +1,4 @@
+Component,R_Composite_Predicts_TPlus1,R_Own_Predicts_TPlus1,Composite_At_Least_As_Good,N_Pairs
+Team_Sack_Rate_Allowed,-0.362,0.375,FALSE,416
+Team_QB_Hit_Rate_Allowed,-0.418,0.504,FALSE,416
+Team_Rush_Stuff_Rate,-0.21,0.344,FALSE,416

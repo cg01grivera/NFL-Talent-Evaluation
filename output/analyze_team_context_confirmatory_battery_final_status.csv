@@ -1,0 +1,9 @@
+Candidate_Id,Position,Stat,Concordance_CI_Lower,Concordance_CI_Upper,Direct_Read_Mean_Rho,Method_Disagreement_Flag,Status,CI_Width,Pool_Flagged_At_Gate6
+C1,RB,Team_Rush_Stuff_Rate,-5.146e-4,0.0308854,-0.0963125494533594,1,null (CI straddles zero),0.0314,FALSE
+C2,QB,Team_Sack_Rate_Allowed,0.019355,0.093055,0.0374505503955968,0,"CONTRADICTED (direct-read direction opposite prediction, despite real concordance value)",0.0737,TRUE
+C3,WR,Team_Sack_Rate_Allowed,-0.0174384,0.0143616,-0.0650483474253212,0,null (CI straddles zero),0.0318,FALSE
+C4,TE,Team_Sack_Rate_Allowed,-0.0111748,0.0276252,-0.0175068702487499,1,null (CI straddles zero),0.0388,TRUE
+C5,QB,Team_QB_Hit_Rate_Allowed,-0.015845,0.090755,0.137646198830409,0,null (CI straddles zero),0.1066,TRUE
+C6,WR,Team_QB_Hit_Rate_Allowed,-0.0114384,-3.384e-4,-0.0253930941924382,0,concordance CI entirely negative (candidate appears to hurt ranking accuracy),0.0111,FALSE
+C7,TE,Team_QB_Hit_Rate_Allowed,-0.0282748,0.0489252,-0.0665564796741284,1,null (CI straddles zero),0.0772,TRUE
+C8,RB,Team_RZ_Trip_Rate,-0.0262146,0.0111854,0.115469353937965,1,null (CI straddles zero),0.0374,FALSE

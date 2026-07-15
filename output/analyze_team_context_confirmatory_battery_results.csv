@@ -1,0 +1,9 @@
+Candidate_Id,Position,Stat,Direction_Predicted,Concordance_Point_Estimate_BiasCorrected,Concordance_CI_Lower_BiasCorrected,Concordance_CI_Upper_BiasCorrected,Direct_Read_Mean_Rho,Method_Disagreement_Flag
+C1,RB,Team_Rush_Stuff_Rate,Negative,0.0139854,-5.146e-4,0.0308854,-0.0963125494533594,1
+C2,QB,Team_Sack_Rate_Allowed,Negative,0.056155,0.019355,0.093055,0.0374505503955968,0
+C3,WR,Team_Sack_Rate_Allowed,Negative,-2.384e-4,-0.0174384,0.0143616,-0.0650483474253212,0
+C4,TE,Team_Sack_Rate_Allowed,Negative,0.0081252,-0.0111748,0.0276252,-0.0175068702487499,1
+C5,QB,Team_QB_Hit_Rate_Allowed,Negative,0.037255,-0.015845,0.090755,0.137646198830409,0
+C6,WR,Team_QB_Hit_Rate_Allowed,Negative,-0.0053384,-0.0114384,-3.384e-4,-0.0253930941924382,0
+C7,TE,Team_QB_Hit_Rate_Allowed,Negative,0.0081252,-0.0282748,0.0489252,-0.0665564796741284,1
+C8,RB,Team_RZ_Trip_Rate,Positive,-0.0057146,-0.0262146,0.0111854,0.115469353937965,1

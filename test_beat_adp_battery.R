@@ -44,6 +44,15 @@ cat("
 library(dplyr)
 script_arg <- grep("--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
 if (length(script_arg) > 0) setwd(dirname(sub("--file=", "", script_arg)))
+# build_position_data() (Gate 1's extra_key_col tests) calls top150_pool()/
+# correct_adp_team() (adp_ppg_utils.R) and decay_weighted_avg_vec()
+# (grading_utils.R) -- these were never exercised by this test file before
+# since build_position_data() had no prior test coverage. Sourced in the
+# same order analyze_estimation_battery.R uses, for consistency.
+source("R/utils_core.R")
+source("R/grading_utils.R")
+source("R/fetch_player_data.R")
+source("R/adp_ppg_utils.R")
 source("R/beat_adp_battery.R")
 
 test_pass <- function(description, condition) {
@@ -713,3 +722,786 @@ all_pass <- test_pass(
 ) && all_pass
 
 cat("\n=== FAMILY-MATRIX Overall:", if (all_pass) "ALL TESTS PASSED" else "AT LEAST ONE TEST FAILED -- DO NOT TRUST THIS VERSION OF THE LIBRARY", "===\n")
+
+# ============================================================
+# WR/TE anomaly diagnosis ladder: D1 (audit_candidate_column_identity)
+# and D2 (compute_candidate_collinearity) -- new 2026-07-12, per
+# WR_TE_ANOMALY_RESOLUTION_PLAN.md. Both get the same fixture discipline
+# as compute_candidate_family_matrix(): known-signal detection,
+# constant-column NA handling, independent-candidate non-detection,
+# output completeness.
+# ============================================================
+cat("\n=== audit_candidate_column_identity() (D1) ===\n")
+
+d1_data <- synth
+d1_data$exact_dup <- d1_data$Prior_PPG                          # exactly identical values
+d1_data$linear_transform <- d1_data$Prior_PPG * 2 + 5           # perfectly correlated, NOT identical values
+d1_data$constant_col <- 3
+set.seed(881)
+d1_data$independent_col <- rnorm(nrow(d1_data))
+
+d1_candidates <- c("Prior_PPG", "exact_dup", "linear_transform", "constant_col", "independent_col")
+d1_result <- audit_candidate_column_identity(d1_data, d1_candidates)
+
+all_pass <- test_pass(
+  "(exact duplicate) Prior_PPG/exact_dup pair is flagged with Values_Identical = TRUE",
+  with(d1_result$identical_pairs,
+       any((Stat_A == "Prior_PPG" & Stat_B == "exact_dup") | (Stat_A == "exact_dup" & Stat_B == "Prior_PPG")) &&
+       Values_Identical[(Stat_A == "Prior_PPG" & Stat_B == "exact_dup") | (Stat_A == "exact_dup" & Stat_B == "Prior_PPG")])
+) && all_pass
+all_pass <- test_pass(
+  "(linear transform) Prior_PPG/linear_transform pair is flagged as correlated but Values_Identical = FALSE -- the exact case this function exists to distinguish from a true duplicate",
+  with(d1_result$identical_pairs,
+       any((Stat_A == "Prior_PPG" & Stat_B == "linear_transform") | (Stat_A == "linear_transform" & Stat_B == "Prior_PPG")) &&
+       !Values_Identical[(Stat_A == "Prior_PPG" & Stat_B == "linear_transform") | (Stat_A == "linear_transform" & Stat_B == "Prior_PPG")])
+) && all_pass
+all_pass <- test_pass(
+  "(constant) constant_col does not appear in any identical_pairs row (undefined correlation, not a false match)",
+  !any(d1_result$identical_pairs$Stat_A == "constant_col" | d1_result$identical_pairs$Stat_B == "constant_col")
+) && all_pass
+all_pass <- test_pass(
+  "(constant) constant_col's column_summary row shows N_Unique = 1, still visible in the audit despite not appearing in identical_pairs",
+  d1_result$column_summary$N_Unique[d1_result$column_summary$Stat == "constant_col"] == 1
+) && all_pass
+all_pass <- test_pass(
+  "(independent) independent_col is NOT flagged as identical/near-identical to Prior_PPG",
+  !with(d1_result$identical_pairs,
+        any((Stat_A == "independent_col" & Stat_B == "Prior_PPG") | (Stat_A == "Prior_PPG" & Stat_B == "independent_col")))
+) && all_pass
+all_pass <- test_pass(
+  "(output completeness) column_summary has one row per candidate",
+  nrow(d1_result$column_summary) == length(d1_candidates) &&
+    setequal(d1_result$column_summary$Stat, d1_candidates)
+) && all_pass
+
+cat("\n=== compute_candidate_collinearity() (D2) ===\n")
+
+d2_data <- synth
+set.seed(882)
+d2_data$high_collinear <- d2_data$RANK * 0.6 + d2_data$Prior_PPG * 0.4 + rnorm(nrow(d2_data), sd = 0.05)  # near-perfect R^2 vs baseline
+d2_data$constant_stat <- 9
+d2_data$noise_stat <- rnorm(nrow(d2_data))  # independent of RANK/Prior_PPG
+
+d2_candidates <- c("high_collinear", "constant_stat", "noise_stat")
+d2_result <- compute_candidate_collinearity(d2_data, d2_candidates)
+
+all_pass <- test_pass(
+  "(a: known signal) A candidate constructed as a near-exact linear function of RANK+Prior_PPG gets R_Squared close to 1",
+  d2_result$R_Squared[d2_result$Stat == "high_collinear"] > 0.9
+) && all_pass
+all_pass <- test_pass(
+  "(b: constant) A constant candidate returns NA for R_Squared, not 0 or 1",
+  is.na(d2_result$R_Squared[d2_result$Stat == "constant_stat"])
+) && all_pass
+all_pass <- test_pass(
+  "(c: independent) A candidate independent of RANK/Prior_PPG gets a LOW R_Squared (< 0.3, generously, not near the high_collinear candidate's)",
+  d2_result$R_Squared[d2_result$Stat == "noise_stat"] < 0.3
+) && all_pass
+all_pass <- test_pass(
+  "(d: output completeness) compute_candidate_collinearity() returns one row per candidate with the expected columns",
+  nrow(d2_result) == length(d2_candidates) &&
+    setequal(names(d2_result), c("Stat", "R_Squared", "N_Obs")) &&
+    setequal(d2_result$Stat, d2_candidates)
+) && all_pass
+
+cat("\n=== D1/D2 (WR/TE ANOMALY DIAGNOSIS) Overall:", if (all_pass) "ALL TESTS PASSED" else "AT LEAST ONE TEST FAILED -- DO NOT TRUST THIS VERSION OF THE LIBRARY", "===\n")
+
+# ============================================================
+# D3 -- collinearity-matched null (residual_permute) synthetic
+# validation, per WR_TE_ANOMALY_RESOLUTION_PLAN.md section 3 and the
+# wr-te-anomaly-diagnosis skill's D3 requirements (a)(b)(c). Per the
+# skill: "If (a) does not reproduce, report that H1's mechanism failed
+# synthetic confirmation -- do not proceed to real data on H1's
+# behalf." This MUST run and pass before D3 measures anything on real
+# WR/TE data.
+#
+# Construction: zero-true-effect candidates built as
+# r*scale(Prior_PPG) + sqrt(1-r^2)*independent_noise, swept across
+# r in {0, 0.5, 0.8} -- collinear with the baseline by design, with NO
+# incremental relationship to season_ppg's residual. If H1 is right,
+# "permute" (destroys collinearity before measuring the null) should
+# under-correct as r grows, leaving a negative residual that grows with
+# r; "residual_permute" (preserves collinearity, destroys only the
+# incremental/residual information) should correct it back to ~0
+# regardless of r.
+# ============================================================
+cat("\n=== D3: collinearity-matched null (residual_permute) synthetic validation ===\n")
+cat("(NOTE: an earlier version of this test constructed only ONE random candidate\n")
+cat(" realization per r value, then averaged many bias-estimate replicates AROUND that\n")
+cat(" one draw. That averages out bias-ESTIMATION noise but not candidate-CONSTRUCTION\n")
+cat(" noise, and produced a false-positive 'confirmation' of requirement (a) that did not\n")
+cat(" survive a properly-powered re-test. This version averages the RAW point estimate\n")
+cat(" over N_OUTER independent candidate draws per r, which is the correct way to ask\n")
+cat(" 'does a zero-true-effect candidate's degradation actually scale with r' rather than\n")
+cat(" 'does one particular random draw happen to look like it does.')\n")
+
+set.seed(4242)
+d3_prior_std <- as.numeric(scale(synth$Prior_PPG))
+d3_resid_std <- as.numeric(scale(synth$residual))
+build_zero_effect_candidate <- function(r) r * d3_prior_std + sqrt(1 - r^2) * rnorm(nrow(synth))
+build_true_effect_candidate <- function(r, effect_size = 1.5) {
+  r * d3_prior_std + sqrt(1 - r^2) * (effect_size * d3_resid_std + rnorm(nrow(synth), sd = 0.3))
+}
+
+d3_rs <- c(0, 0.5, 0.8)
+D3_N_OUTER <- 10
+D3_N_INNER <- 10
+D3_N_BOOT <- 60
+
+d3_zero_df <- do.call(rbind, lapply(d3_rs, function(r) {
+  raws <- numeric(D3_N_OUTER); cp <- numeric(D3_N_OUTER); cm <- numeric(D3_N_OUTER)
+  for (i in seq_len(D3_N_OUTER)) {
+    synth_d3 <- synth
+    synth_d3$d3_candidate <- build_zero_effect_candidate(r)
+    raw <- run_concordance_bootstrap(synth_d3, "d3_candidate", significance_window = 12, n_boot = D3_N_BOOT, conf_level = 0.90)
+    bp <- estimate_concordance_null_bias(synth_d3, "d3_candidate", n_replicates = D3_N_INNER,
+                                          significance_window = 12, n_boot = D3_N_BOOT, null_mode = "permute")
+    bm <- estimate_concordance_null_bias(synth_d3, "d3_candidate", n_replicates = D3_N_INNER,
+                                          significance_window = 12, n_boot = D3_N_BOOT, null_mode = "residual_permute")
+    raws[i] <- raw["Point_Estimate"]
+    cp[i] <- raw["Point_Estimate"] - bp["Null_Bias"]
+    cm[i] <- raw["Point_Estimate"] - bm["Null_Bias"]
+  }
+  data.frame(r = r, mean_raw = mean(raws), raw_SE = sd(raws) / sqrt(D3_N_OUTER),
+             mean_corrected_permute = mean(cp), corrected_permute_SE = sd(cp) / sqrt(D3_N_OUTER),
+             mean_corrected_matched = mean(cm), corrected_matched_SE = sd(cm) / sqrt(D3_N_OUTER))
+}))
+cat("\n--- Zero-true-effect sweep, averaged over", D3_N_OUTER, "independent candidate draws per r ---\n")
+print(d3_zero_df, row.names = FALSE)
+
+# Requirement (a): does a zero-true-effect candidate's raw point estimate
+# actually degrade (go more negative) as r increases? Test via the
+# difference between r=0.8 and r=0 means, against the pooled SE of that
+# difference -- a properly powered comparison, not just eyeballing a slope.
+diff_raw <- d3_zero_df$mean_raw[d3_zero_df$r == 0.8] - d3_zero_df$mean_raw[d3_zero_df$r == 0]
+se_diff_raw <- sqrt(d3_zero_df$raw_SE[d3_zero_df$r == 0.8]^2 + d3_zero_df$raw_SE[d3_zero_df$r == 0]^2)
+z_stat <- diff_raw / se_diff_raw
+cat("\nr=0.8 minus r=0 raw point estimate:", round(diff_raw, 4), " (pooled SE", round(se_diff_raw, 4),
+    ", z =", round(z_stat, 2), ")\n")
+
+all_pass <- test_pass(
+  "(a) A zero-true-effect candidate's raw concordance point estimate shows a REAL (z < -2), reproducible degradation as collinearity (r) increases from 0 to 0.8",
+  z_stat < -2
+) && all_pass
+
+if (!all_pass) {
+  cat("\n(a) DID NOT REPRODUCE under a properly-powered test. Per the wr-te-anomaly-diagnosis\n")
+  cat("skill: 'If (a) does not reproduce, report that H1's mechanism failed synthetic\n")
+  cat("confirmation -- do not proceed to real data on H1's behalf.' This is being reported\n")
+  cat("as specified -- residual_permute's real-WR-data measurement is NOT run on this basis.\n")
+} else {
+  all_pass <- test_pass(
+    "(b) 'residual_permute' mode's corrected estimates stay near zero across the whole sweep (max |mean_corrected_matched| < 0.03)",
+    max(abs(d3_zero_df$mean_corrected_matched)) < 0.03
+  ) && all_pass
+
+  d3_true_r <- 0.8
+  synth_d3c <- synth
+  synth_d3c$d3_candidate_true <- build_true_effect_candidate(d3_true_r)
+  raw_true <- run_concordance_bootstrap(synth_d3c, "d3_candidate_true", significance_window = 12, n_boot = D3_N_BOOT, conf_level = 0.90)
+  bias_matched_true <- estimate_concordance_null_bias(synth_d3c, "d3_candidate_true", n_replicates = D3_N_INNER,
+                                                       significance_window = 12, n_boot = D3_N_BOOT, null_mode = "residual_permute")
+  corrected_true <- unname(raw_true["Point_Estimate"] - bias_matched_true["Null_Bias"])
+  cat("\n--- (c) Real injected positive effect (r =", d3_true_r, ") ---\n")
+  cat("Raw point estimate:", round(raw_true["Point_Estimate"], 4),
+      " | residual_permute-corrected:", round(corrected_true, 4), "\n")
+  all_pass <- test_pass(
+    "(c) With a real injected positive effect, residual_permute's corrected estimate is materially positive (> 0.02), not zeroed out",
+    corrected_true > 0.02
+  ) && all_pass
+}
+
+cat("\n=== D3 SYNTHETIC VALIDATION Overall:",
+    if (all_pass) "ALL TESTS PASSED -- safe to proceed to real WR data" else "H1's SYNTHETIC MECHANISM DID NOT CONFIRM -- DO NOT MEASURE REAL DATA UNDER residual_permute AS A VALIDATED FIX",
+    "===\n")
+
+# ============================================================
+# D3 cache-key isolation check: a residual_permute call and a permute
+# call for the identical position/candidate/config must NOT collide in
+# the cache (the exact hazard null_mode was added to the cache key to
+# prevent).
+# ============================================================
+cat("\n=== D3 cache-key isolation (null_mode) ===\n")
+temp_cache_d3 <- tempfile(fileext = ".csv")
+on.exit(unlink(temp_cache_d3), add = TRUE)
+bias_a <- get_or_compute_concordance_null_bias(
+  synth, "candidate_permuted", position = "TESTD3",
+  seasons_to_test = 2001:2012, min_games = 0, decay_r = 0.5, lookback_years = 4,
+  n_meta_replicates = 2, n_replicates = 5, n_boot = 50, cache_path = temp_cache_d3,
+  null_mode = "permute"
+)
+bias_b <- get_or_compute_concordance_null_bias(
+  synth, "candidate_permuted", position = "TESTD3",
+  seasons_to_test = 2001:2012, min_games = 0, decay_r = 0.5, lookback_years = 4,
+  n_meta_replicates = 2, n_replicates = 5, n_boot = 50, cache_path = temp_cache_d3,
+  null_mode = "residual_permute"
+)
+cache_d3 <- readr::read_csv(temp_cache_d3, show_col_types = FALSE)
+all_pass <- test_pass(
+  "Identical position/candidate/config but different null_mode produces TWO separate cache entries, not a collision",
+  nrow(cache_d3) == 2
+) && all_pass
+
+cat("\n=== D3 CACHE ISOLATION Overall:", if (all_pass) "ALL TESTS PASSED" else "AT LEAST ONE TEST FAILED -- DO NOT TRUST THIS VERSION OF THE LIBRARY", "===\n")
+
+# ============================================================
+# D4 -- direct signal reads (machinery-free H2 corroboration), per
+# WR_TE_ANOMALY_RESOLUTION_PLAN.md section 3. Two new library pieces:
+# run_concordance(..., return_fold_coefs=TRUE) + summarize_fold_
+# coefficients() (D4a: per-fold candidate coefficient distribution),
+# and compute_candidate_signal_read() (D4b: per-season Spearman vs the
+# RANK+Prior_PPG residual, no bootstrap, no bias correction).
+#
+# Fixtures: a candidate with a KNOWN, real negative relationship to the
+# outcome beyond RANK/Prior_PPG must show consistently negative fold
+# coefficients AND consistently negative per-season Spearman rho; a
+# pure-noise candidate (reusing the existing candidate_permuted
+# fixture -- shuffled within season, no true relationship by
+# construction) must show a roughly mixed sign pattern, not a
+# consistent one; a constant candidate must be handled gracefully
+# (NA), not error.
+# ============================================================
+cat("\n=== D4: direct signal reads (run_concordance return_fold_coefs, compute_candidate_signal_read) ===\n")
+
+set.seed(505)
+synth$candidate_known_negative <- -1.8 * synth$residual + rnorm(nrow(synth), sd = 1.5)
+synth$candidate_constant_d4 <- 5
+
+# D4a: fold coefficients
+res_neg <- run_concordance(synth, "candidate_known_negative", return_fold_coefs = TRUE)
+fc_neg <- attr(res_neg, "fold_coefficients")
+sfc_neg <- summarize_fold_coefficients(fc_neg)
+
+res_noise <- run_concordance(synth, "candidate_permuted", return_fold_coefs = TRUE)
+fc_noise <- attr(res_noise, "fold_coefficients")
+sfc_noise <- summarize_fold_coefficients(fc_noise)
+
+res_default <- run_concordance(synth, "candidate_known_negative")
+res_const <- run_concordance(synth, "candidate_constant_d4", return_fold_coefs = TRUE)
+sfc_const <- summarize_fold_coefficients(attr(res_const, "fold_coefficients"))
+
+cat("\n--- D4a: fold-coefficient summaries ---\n")
+cat("Known-negative-effect candidate:", sfc_neg$N_Negative, "of", sfc_neg$N_Folds, "folds negative, mean =", round(sfc_neg$Mean, 4), "\n")
+cat("Noise candidate:                ", sfc_noise$N_Negative, "of", sfc_noise$N_Folds, "folds negative, mean =", round(sfc_noise$Mean, 4), "\n")
+
+all_pass <- test_pass(
+  "(a) A candidate with a known real negative effect shows consistently negative fold coefficients (>= 80% of folds negative)",
+  sfc_neg$Pct_Negative >= 0.80
+) && all_pass
+all_pass <- test_pass(
+  "(b) A pure-noise candidate's fold coefficients are small in MAGNITUDE relative to the known-effect candidate's (not a sign-mixing check: with only one fixed noise draw, LOSO folds share ~11/12 of their training data, so some sign consistency across folds is expected from fold non-independence alone, not evidence of a real relationship -- magnitude is the valid comparison)",
+  abs(sfc_noise$Mean) < abs(sfc_neg$Mean) / 5
+) && all_pass
+all_pass <- test_pass(
+  "(default/backward compat) run_concordance() without return_fold_coefs has no fold_coefficients attribute attached",
+  is.null(attr(res_default, "fold_coefficients"))
+) && all_pass
+all_pass <- test_pass(
+  "(constant) A constant candidate's fold coefficients are handled gracefully (NA per fold via aliasing, not an error) and summarize_fold_coefficients() doesn't crash on them",
+  is.list(sfc_const) && sfc_const$N_Folds >= 0
+) && all_pass
+all_pass <- test_pass(
+  "(output completeness) summarize_fold_coefficients() always returns all documented fields",
+  setequal(names(sfc_neg), c("N_Folds", "N_Negative", "N_Positive", "Pct_Negative", "Mean", "SD", "Min", "Max"))
+) && all_pass
+all_pass <- test_pass(
+  "(null input) summarize_fold_coefficients(NULL) returns N_Folds = 0 gracefully, not an error",
+  summarize_fold_coefficients(NULL)$N_Folds == 0
+) && all_pass
+
+# D4b: per-season Spearman signal read
+sig_neg <- compute_candidate_signal_read(synth, "candidate_known_negative")
+sig_noise <- compute_candidate_signal_read(synth, "candidate_permuted")
+sig_const <- compute_candidate_signal_read(synth, "candidate_constant_d4")
+
+cat("\n--- D4b: per-season Spearman signal reads ---\n")
+cat("Known-negative-effect candidate: pct_negative =", round(sig_neg$pct_negative, 3), ", mean_rho =", round(sig_neg$mean_rho, 3), "\n")
+cat("Noise candidate:                 pct_negative =", round(sig_noise$pct_negative, 3), ", mean_rho =", round(sig_noise$mean_rho, 3), "\n")
+
+all_pass <- test_pass(
+  "(a) A candidate with a known real negative effect shows consistently negative per-season Spearman rho (>= 70% of seasons negative)",
+  sig_neg$pct_negative >= 0.70
+) && all_pass
+all_pass <- test_pass(
+  "(b) A pure-noise candidate's per-season Spearman signs are mixed, not consistently negative (between 20% and 80%)",
+  sig_noise$pct_negative > 0.20 && sig_noise$pct_negative < 0.80
+) && all_pass
+all_pass <- test_pass(
+  "(constant) A constant candidate returns NA Spearman rho for every season, not an error or a false 0/1",
+  all(is.na(sig_const$by_season$Spearman_Rho))
+) && all_pass
+all_pass <- test_pass(
+  "(output completeness) by_season has one row per season present in the data, with the expected columns",
+  nrow(sig_neg$by_season) == length(unique(synth$Season)) &&
+    setequal(names(sig_neg$by_season), c("Season", "N", "Spearman_Rho"))
+) && all_pass
+
+cat("\n=== D4 Overall:", if (all_pass) "ALL TESTS PASSED" else "AT LEAST ONE TEST FAILED -- DO NOT TRUST THIS VERSION OF THE LIBRARY", "===\n")
+
+# ============================================================
+# coverage_n_replicates parametrization check -- confirms the default
+# (50) preserves prior behavior exactly (no silent change to the
+# already-shipped WR run this session reviewed) and that a caller can
+# actually request more replicates for a more decisive D0 read.
+# ============================================================
+cat("\n=== coverage_n_replicates parametrization ===\n")
+temp_cache_cov2 <- tempfile(fileext = ".csv")
+on.exit(unlink(temp_cache_cov2), add = TRUE)
+cov_result2 <- run_estimation_for_position(
+  "TESTCOV2", synth, candidates = c("candidate_a"),
+  representative_candidate_col = "candidate_a",
+  seasons_to_test = 2001:2012, min_games = 0, decay_r = 0.5, lookback_years = 4,
+  n_boot = 100, conf_level = 0.90, run_coverage_spotcheck = TRUE,
+  coverage_n_replicates = 20,
+  bias_n_meta_replicates = 2, bias_n_replicates = 10, bias_n_boot = 50,
+  cache_path = temp_cache_cov2
+)
+cov_attr2 <- attr(cov_result2, "coverage_spotcheck")
+all_pass <- test_pass(
+  "coverage_n_replicates is respected: requesting 20 replicates produces N_Trials = 20, not the old hardcoded 50",
+  !is.null(cov_attr2) && cov_attr2$N_Trials == 20
+) && all_pass
+
+cat("\n=== COVERAGE_N_REPLICATES Overall:", if (all_pass) "ALL TESTS PASSED" else "AT LEAST ONE TEST FAILED -- DO NOT TRUST THIS VERSION OF THE LIBRARY", "===\n")
+
+# ============================================================
+# GATE 1 (TEAM_CONTEXT_REWORK_PLAN_V2.md / TEAM_CONTEXT_PREREGISTRATION_
+# V2.md): library extensions for the Team-Context Rework, no real data.
+# Three pieces, per the team-context-execution skill's Gate 1 list:
+#   1. build_position_data(..., extra_key_col = "Team") -- default-
+#      regression, team key routing, team-switcher, poisoned-future-row.
+#   2. Bias estimator permute_within = c("player","team").
+#   3. Direct-read emission wired into the battery path + method-
+#      disagreement flag.
+# ============================================================
+
+# ------------------------------------------------------------
+# Gate 1.1: build_position_data() extra_key_col
+# ------------------------------------------------------------
+cat("\n=== GATE 1.1: build_position_data() extra_key_col ===\n")
+
+tc_seasons <- 2020:2023               # target seasons under test
+tc_history_seasons <- 2016:2022       # extra_data history, covers every target season's end_year = yr-1
+tc_players <- paste0("tcplayer", 1:6)
+tc_base_team <- setNames(c("TEAM_A", "TEAM_A", "TEAM_A", "TEAM_B", "TEAM_B", "TEAM_B"), tc_players)
+
+# tcplayer1 is traded to TEAM_B for the 2023 season ONLY -- this is the
+# TRUE, post-correction team (what correct_adp_team() should assign from
+# real "play" data); the ADP file itself stays stale (still lists him on
+# TEAM_A for every season, exercising correct_adp_team()'s override too).
+tc_actual_team_for_season <- function(yr) {
+  tm <- tc_base_team
+  if (yr == 2023) tm["tcplayer1"] <- "TEAM_B"
+  tm
+}
+
+set.seed(2024)
+tc_adp <- do.call(rbind, lapply(tc_seasons, function(yr) {
+  data.frame(Year = yr, Pos = "RB", Team = unname(tc_base_team[tc_players]),
+             norm_name = tc_players, RANK = sample(1:150, length(tc_players)))
+}))
+tc_ppg <- do.call(rbind, lapply(tc_seasons, function(yr) {
+  tm <- tc_actual_team_for_season(yr)
+  data.frame(season = yr, position = "RB", primary_team = unname(tm[tc_players]),
+             norm_name = tc_players, season_ppg = rnorm(length(tc_players), mean = 12, sd = 3))
+}))
+tc_prior <- do.call(rbind, lapply(tc_seasons, function(yr) {
+  data.frame(Season = yr, position = "RB", norm_name = tc_players,
+             Prior_PPG = rnorm(length(tc_players), mean = 12, sd = 3))
+}))
+
+# Team-level extra_data: each team's history is a CONSTANT (10 for
+# TEAM_A, 90 for TEAM_B) across every history season -- a decay-weighted
+# average of a constant series equals that constant exactly regardless
+# of decay_r/lookback, so every expected value below is exact, not
+# approximate.
+tc_extra <- do.call(rbind, lapply(tc_history_seasons, function(yr) {
+  data.frame(Team = c("TEAM_A", "TEAM_B"), Season = yr, team_stat = c(10, 90))
+}))
+
+tc_result <- build_position_data(
+  pos = "RB", adp = tc_adp, all_seasons_ppg = tc_ppg, prior_ppg_lookup = tc_prior,
+  extra_data = tc_extra, candidates = "team_stat",
+  seasons_to_test = tc_seasons, decay_r = 0.5, lookback_years = 4,
+  extra_key_col = "Team"
+)
+
+all_pass <- test_pass(
+  "(sanity) build_position_data() with extra_key_col='Team' returns a non-empty row per season",
+  nrow(tc_result) == length(tc_seasons) * length(tc_players)
+) && all_pass
+
+# (a) Team key routing: same-team players share values; different teams don't
+tc_row_2021 <- tc_result[tc_result$Season == 2021, ]
+tc_teamA_vals <- tc_row_2021$team_stat[tc_row_2021$Team == "TEAM_A"]
+tc_teamB_vals <- tc_row_2021$team_stat[tc_row_2021$Team == "TEAM_B"]
+all_pass <- test_pass(
+  "(team key routing) every TEAM_A player shares the identical team_stat value within a season",
+  length(unique(tc_teamA_vals)) == 1
+) && all_pass
+all_pass <- test_pass(
+  "(team key routing) every TEAM_B player shares the identical team_stat value within a season",
+  length(unique(tc_teamB_vals)) == 1
+) && all_pass
+all_pass <- test_pass(
+  "(team key routing) TEAM_A's shared value is its own team's constant history (10), not TEAM_B's",
+  isTRUE(all.equal(unique(tc_teamA_vals), 10))
+) && all_pass
+all_pass <- test_pass(
+  "(team key routing) TEAM_B's shared value is its own team's constant history (90), not TEAM_A's",
+  isTRUE(all.equal(unique(tc_teamB_vals), 90))
+) && all_pass
+
+# (b) Team-switcher: tcplayer1 gets the TARGET-SEASON team's (TEAM_B's)
+# trailing history in 2023, not his ADP-listed/prior-season team's (TEAM_A)
+tc_row_2023 <- tc_result[tc_result$Season == 2023, ]
+tc_player1_2023 <- tc_row_2023[tc_row_2023$norm_name == "tcplayer1", ]
+all_pass <- test_pass(
+  "(team-switcher) tcplayer1's Team is corrected to TEAM_B (target-season team), overriding ADP's stale TEAM_A",
+  tc_player1_2023$Team == "TEAM_B"
+) && all_pass
+all_pass <- test_pass(
+  "(team-switcher) tcplayer1 draws TEAM_B's trailing history (90), not TEAM_A's (10), in the season he's traded",
+  isTRUE(all.equal(tc_player1_2023$team_stat, 90))
+) && all_pass
+
+# (c) Poisoned-future-row: a Season==2023 (future/target-year, relative
+# to every end_year in tc_seasons) extra_data row for TEAM_A with an
+# extreme sentinel MUST NOT change any computed value -- reuses
+# decay_weighted_avg_vec()'s existing years_back >= 0 guard, exercised
+# here through the new Team-keyed path specifically.
+tc_extra_poisoned <- rbind(tc_extra, data.frame(Team = "TEAM_A", Season = 2023, team_stat = 99999))
+tc_result_poisoned <- build_position_data(
+  pos = "RB", adp = tc_adp, all_seasons_ppg = tc_ppg, prior_ppg_lookup = tc_prior,
+  extra_data = tc_extra_poisoned, candidates = "team_stat",
+  seasons_to_test = tc_seasons, decay_r = 0.5, lookback_years = 4,
+  extra_key_col = "Team"
+)
+all_pass <- test_pass(
+  "(poisoned-future-row) injecting a Season==2023 sentinel row leaves EVERY computed team_stat value unchanged",
+  isTRUE(all.equal(tc_result$team_stat, tc_result_poisoned$team_stat))
+) && all_pass
+if (!isTRUE(all.equal(tc_result$team_stat, tc_result_poisoned$team_stat))) {
+  cat("  POISONED-ROW GUARD FAILED under extra_key_col='Team' -- per CLAUDE.md invariant #8 and the\n")
+  cat("  prereg's Rule 4, C5 (Team_RZ_Trip_Rate) must be DROPPED, not patched, if this cannot pass.\n")
+}
+
+# (d) Default-regression: extra_key_col defaults to "norm_name" and must
+# reproduce the ORIGINAL (pre-Gate-1) player-keyed call byte-for-byte --
+# checked here by calling build_position_data() once via the old
+# 9-positional-argument form (no extra_key_col at all) and once with
+# extra_key_col = "norm_name" passed explicitly, on a player-keyed
+# extra_data table, and confirming the two calls are identical().
+tc_extra_player <- do.call(rbind, lapply(tc_history_seasons, function(yr) {
+  data.frame(norm_name = tc_players, Season = yr, player_stat = seq_along(tc_players) * 10)
+}))
+tc_result_implicit_default <- build_position_data(
+  "RB", tc_adp, tc_ppg, tc_prior, tc_extra_player, "player_stat", tc_seasons, 0.5, 4
+)
+tc_result_explicit_default <- build_position_data(
+  pos = "RB", adp = tc_adp, all_seasons_ppg = tc_ppg, prior_ppg_lookup = tc_prior,
+  extra_data = tc_extra_player, candidates = "player_stat",
+  seasons_to_test = tc_seasons, decay_r = 0.5, lookback_years = 4,
+  extra_key_col = "norm_name"
+)
+all_pass <- test_pass(
+  "(default-regression, sanity) player_stat is not all-NA -- the comparison below would be vacuous otherwise",
+  any(!is.na(tc_result_implicit_default$player_stat))
+) && all_pass
+all_pass <- test_pass(
+  "(default-regression) build_position_data() with the OLD 9-positional-arg call (extra_key_col defaulted) is IDENTICAL to an explicit extra_key_col='norm_name' call, byte-for-byte",
+  isTRUE(identical(tc_result_implicit_default, tc_result_explicit_default))
+) && all_pass
+
+cat("\n=== GATE 1.1 Overall:", if (all_pass) "ALL TESTS PASSED" else "AT LEAST ONE TEST FAILED -- DO NOT TRUST THIS VERSION OF THE LIBRARY", "===\n")
+
+# ------------------------------------------------------------
+# Gate 1.2: bias estimator permute_within = c("player", "team")
+# ------------------------------------------------------------
+cat("\n=== GATE 1.2: bias estimator permute_within (team-broadcast null) ===\n")
+
+# A minimal broadcast-shaped fixture: 4 teams x 5 players x 3 seasons,
+# candidate value is an exact per-team constant by construction -- so
+# "does permute_within='team' preserve the broadcast/clustered tie
+# structure" has an unambiguous known-correct answer (every row sharing
+# a team must ALSO share its shuffled value), while permute_within=
+# 'player' (the original, row-level shuffle) is expected to break it.
+set.seed(3030)
+bcast_data <- do.call(rbind, lapply(1:3, function(s) {
+  data.frame(
+    Season = 2000 + s,
+    Team = rep(c("TEAM_A", "TEAM_B", "TEAM_C", "TEAM_D"), each = 5),
+    team_broadcast_stat = rep(c(10, 20, 30, 40), each = 5)
+  )
+}))
+
+team_mode_preserves_broadcast <- function(seed) {
+  set.seed(seed)
+  perm <- build_null_candidate_column(bcast_data, "team_broadcast_stat", null_mode = "permute", permute_within = "team")
+  groups <- split(perm$permuted, list(perm$Season, perm$Team))
+  all(sapply(groups, function(g) length(unique(g)) == 1)) &&
+    all(sapply(split(perm$permuted, perm$Season), function(s) setequal(unique(s), c(10, 20, 30, 40))))
+}
+player_mode_breaks_broadcast <- function(seed) {
+  set.seed(seed)
+  perm <- build_null_candidate_column(bcast_data, "team_broadcast_stat", null_mode = "permute", permute_within = "player")
+  groups <- split(perm$permuted, list(perm$Season, perm$Team))
+  any(sapply(groups, function(g) length(unique(g)) > 1))
+}
+
+n_perm_draws <- 10
+team_preserved_count <- sum(sapply(1:n_perm_draws, team_mode_preserves_broadcast))
+player_broke_count <- sum(sapply((n_perm_draws + 1):(2 * n_perm_draws), player_mode_breaks_broadcast))
+
+all_pass <- test_pass(
+  sprintf("(team mode) permute_within='team' preserves same-team-shares-a-value in EVERY one of %d independent draws (got %d/%d)",
+          n_perm_draws, team_preserved_count, n_perm_draws),
+  team_preserved_count == n_perm_draws
+) && all_pass
+all_pass <- test_pass(
+  sprintf("(player mode contrast) permute_within='player' (the original row-level shuffle) breaks the broadcast structure in >=90%% of %d independent draws (got %d/%d) -- confirms the two modes are genuinely different, not one silently aliasing the other",
+          n_perm_draws, player_broke_count, n_perm_draws),
+  player_broke_count / n_perm_draws >= 0.90
+) && all_pass
+
+# Invalid combination refused loudly, not silently downgraded
+all_pass <- test_pass(
+  "(unvalidated combination refused) permute_within='team' + null_mode='residual_permute' errors rather than silently falling back to a player-level shuffle",
+  tryCatch({
+    build_null_candidate_column(bcast_data, "team_broadcast_stat", null_mode = "residual_permute", permute_within = "team")
+    FALSE
+  }, error = function(e) TRUE)
+) && all_pass
+all_pass <- test_pass(
+  "(invalid permute_within value) an unrecognized permute_within value errors rather than being silently ignored",
+  tryCatch({
+    build_null_candidate_column(bcast_data, "team_broadcast_stat", permute_within = "nonsense")
+    FALSE
+  }, error = function(e) TRUE)
+) && all_pass
+
+# Cache-key isolation: identical position/candidate/config but different
+# permute_within must NOT collide in the cache -- the same hazard
+# null_mode was added to the cache key to prevent (D3), now for
+# permute_within too (CLAUDE.md invariant #3: never reuse a bias across
+# permutation modes).
+set.seed(4040)
+bcast_full <- bcast_data
+bcast_full$RANK <- sample(1:150, nrow(bcast_full), replace = TRUE)
+bcast_full$Prior_PPG <- rnorm(nrow(bcast_full), mean = 12, sd = 3)
+bcast_full$season_ppg <- rnorm(nrow(bcast_full), mean = 12, sd = 3)
+
+temp_cache_permwithin <- tempfile(fileext = ".csv")
+on.exit(unlink(temp_cache_permwithin), add = TRUE)
+bias_player_mode <- get_or_compute_concordance_null_bias(
+  bcast_full, "team_broadcast_stat", position = "TESTPERMWITHIN",
+  seasons_to_test = 2001:2003, min_games = 0, decay_r = 0.5, lookback_years = 4,
+  n_meta_replicates = 2, n_replicates = 5, n_boot = 50, cache_path = temp_cache_permwithin,
+  permute_within = "player"
+)
+bias_team_mode <- get_or_compute_concordance_null_bias(
+  bcast_full, "team_broadcast_stat", position = "TESTPERMWITHIN",
+  seasons_to_test = 2001:2003, min_games = 0, decay_r = 0.5, lookback_years = 4,
+  n_meta_replicates = 2, n_replicates = 5, n_boot = 50, cache_path = temp_cache_permwithin,
+  permute_within = "team"
+)
+cache_permwithin <- readr::read_csv(temp_cache_permwithin, show_col_types = FALSE)
+all_pass <- test_pass(
+  "(cache isolation) identical position/candidate/config but different permute_within produces TWO separate cache entries, not a collision",
+  nrow(cache_permwithin) == 2
+) && all_pass
+
+cat("\n=== GATE 1.2 Overall:", if (all_pass) "ALL TESTS PASSED" else "AT LEAST ONE TEST FAILED -- DO NOT TRUST THIS VERSION OF THE LIBRARY", "===\n")
+
+# ------------------------------------------------------------
+# Gate 1.3: direct-read emission wired into the battery path +
+# method-disagreement flag (TEAM_CONTEXT_REWORK_PLAN_V2.md Section 6)
+# ------------------------------------------------------------
+cat("\n=== GATE 1.3: direct-read emission + method-disagreement flag ===\n")
+
+# compute_method_disagreement_flag() fixture tests -- pure function, no
+# battery machinery involved, so every edge case gets an exact known answer.
+all_pass <- test_pass("(agree, both positive) not flagged", !compute_method_disagreement_flag(0.02, 0.03)) && all_pass
+all_pass <- test_pass("(agree, both negative) not flagged", !compute_method_disagreement_flag(-0.02, -0.03)) && all_pass
+all_pass <- test_pass("(disagree) opposite signs -> flag fires", compute_method_disagreement_flag(0.02, -0.03)) && all_pass
+all_pass <- test_pass("(disagree, reversed) opposite signs -> flag fires", compute_method_disagreement_flag(-0.02, 0.03)) && all_pass
+all_pass <- test_pass("(zero concordance) not flagged -- no directional claim on that side to conflict with", !compute_method_disagreement_flag(0, -0.03)) && all_pass
+all_pass <- test_pass("(zero direct-read) not flagged -- no directional claim on that side to conflict with", !compute_method_disagreement_flag(0.02, 0)) && all_pass
+all_pass <- test_pass("(NA concordance) not flagged, not an error", !compute_method_disagreement_flag(NA_real_, -0.03)) && all_pass
+all_pass <- test_pass("(NA direct-read) not flagged, not an error", !compute_method_disagreement_flag(0.02, NA_real_)) && all_pass
+all_pass <- test_pass("(both NA) not flagged, not an error", !compute_method_disagreement_flag(NA_real_, NA_real_)) && all_pass
+
+# run_full_battery_estimation(..., return_direct_reads=) wiring
+res_no_direct <- run_full_battery_estimation(synth, "candidate_known_negative", n_boot = 100)
+all_pass <- test_pass(
+  "(backward compat) return_direct_reads defaults FALSE and attaches no fold_coef_summary/signal_read attributes",
+  is.null(attr(res_no_direct, "fold_coef_summary")) && is.null(attr(res_no_direct, "signal_read"))
+) && all_pass
+
+res_direct <- run_full_battery_estimation(synth, "candidate_known_negative", n_boot = 100, return_direct_reads = TRUE)
+all_pass <- test_pass(
+  "return_direct_reads=TRUE attaches a non-NULL fold_coef_summary",
+  !is.null(attr(res_direct, "fold_coef_summary"))
+) && all_pass
+all_pass <- test_pass(
+  "return_direct_reads=TRUE attaches a non-NULL signal_read",
+  !is.null(attr(res_direct, "signal_read"))
+) && all_pass
+
+# run_estimation_for_position() output wiring -- output-completeness,
+# matching this file's own established convention for orchestration
+# functions (routing/columns checked, not re-deriving statistical values).
+temp_cache_directreads <- tempfile(fileext = ".csv")
+on.exit(unlink(temp_cache_directreads), add = TRUE)
+direct_reads_result <- run_estimation_for_position(
+  "TESTDIRECT", synth, candidates = c("candidate_a", "candidate_b"),
+  representative_candidate_col = "candidate_a",
+  seasons_to_test = 2001:2012, min_games = 0, decay_r = 0.5, lookback_years = 4,
+  n_boot = 100, bias_n_meta_replicates = 2, bias_n_replicates = 10, bias_n_boot = 50,
+  cache_path = temp_cache_directreads, emit_direct_reads = TRUE
+)
+required_direct_fields <- c("Direct_Read_Mean_Rho", "Direct_Read_Pct_Negative",
+                             "Fold_Coef_Mean", "Fold_Coef_Pct_Negative", "Method_Disagreement_Flag")
+missing_direct_fields <- setdiff(required_direct_fields, names(direct_reads_result))
+all_pass <- test_pass(
+  paste0("emit_direct_reads=TRUE (the new default) wires every direct-read field into run_estimation_for_position()'s output",
+         if (length(missing_direct_fields) > 0) paste0(" -- MISSING: ", paste(missing_direct_fields, collapse = ", ")) else ""),
+  length(missing_direct_fields) == 0
+) && all_pass
+all_pass <- test_pass(
+  "Method_Disagreement_Flag is always exactly 0 or 1 (never NA), safe for downstream filtering",
+  all(direct_reads_result$Method_Disagreement_Flag %in% c(0, 1))
+) && all_pass
+
+direct_reads_off <- run_estimation_for_position(
+  "TESTDIRECTOFF", synth, candidates = c("candidate_a"),
+  representative_candidate_col = "candidate_a",
+  seasons_to_test = 2001:2012, min_games = 0, decay_r = 0.5, lookback_years = 4,
+  n_boot = 100, bias_n_meta_replicates = 2, bias_n_replicates = 10, bias_n_boot = 50,
+  cache_path = tempfile(fileext = ".csv"), emit_direct_reads = FALSE
+)
+all_pass <- test_pass(
+  "(backward-compat opt-out) emit_direct_reads=FALSE produces NONE of the direct-read columns",
+  length(intersect(required_direct_fields, names(direct_reads_off))) == 0
+) && all_pass
+
+cat("\n=== GATE 1.3 Overall:", if (all_pass) "ALL TESTS PASSED" else "AT LEAST ONE TEST FAILED -- DO NOT TRUST THIS VERSION OF THE LIBRARY", "===\n")
+
+cat("\n================================================================\n")
+cat("  GATE 1 FINAL:", if (all_pass) "ALL TESTS PASSED -- full suite green, safe to proceed to Gate 2" else "AT LEAST ONE TEST FAILED -- DO NOT PROCEED PAST GATE 1", "\n")
+cat("================================================================\n")
+
+# ============================================================
+# GATE 3 (TEAM_CONTEXT_REWORK_PLAN_V2.md Section 4.3 / TEAM_CONTEXT_
+# PREREGISTRATION_V2.md Rule 5): permutation-unit synthetic. Resolves
+# BIAS_PERMUTE_WITHIN by comparing player-level vs team-level
+# permutation-null CALIBRATION on a zero-effect BROADCAST candidate --
+# no real data touched.
+#
+# WHY THE OUTCOME NEEDS ITS OWN TEAM-CLUSTERED COMPONENT: a first attempt
+# at this synthetic (season_ppg built from RANK/Prior_PPG alone, no team
+# structure) showed IDENTICAL coverage for both modes -- because a linear
+# regression is blind to WHICH players share a permuted value; it only
+# sees the marginal distribution of (candidate, RANK, Prior_PPG,
+# season_ppg) tuples, and a full permutation preserves that marginal
+# distribution identically whether shuffled by player or by team. The
+# two modes can only differ when something ELSE in the model (the
+# outcome) is ALSO team-clustered -- exactly the real-world case (the
+# prereg's own clustering caveat: "teammates share fates (QB, injuries,
+# script)"). This synthetic injects a real team-level outcome component
+# (team_effect) for that reason -- it is not decoration, it is the part
+# of the design that makes the comparison meaningful at all.
+# ============================================================
+cat("\n=== GATE 3: permutation-unit synthetic (player vs team calibration) ===\n")
+
+set.seed(9191)
+g3_n_seasons <- 12
+g3_teams <- paste0("TEAM_", LETTERS[1:8])
+g3_n_per_team <- 5
+g3_n_per_season <- length(g3_teams) * g3_n_per_team
+
+g3_build_season <- function(s) {
+  RANK <- sample(1:150, g3_n_per_season)
+  Prior_PPG <- rnorm(g3_n_per_season, mean = 15, sd = 5)
+  Team <- rep(g3_teams, each = g3_n_per_team)
+  # Real team-clustered outcome component (shared game script, opponent
+  # strength, team quality) -- see the rationale above.
+  team_effect <- setNames(rnorm(length(g3_teams), sd = 3), g3_teams)
+  season_ppg <- 25 - 0.05 * RANK + 0.3 * Prior_PPG + team_effect[Team] + rnorm(g3_n_per_season, sd = 2)
+  data.frame(Season = 2000 + s, Team, RANK, Prior_PPG, season_ppg)
+}
+g3_base <- do.call(rbind, lapply(1:g3_n_seasons, g3_build_season))
+# Zero-effect BROADCAST candidate: one random draw per team-season,
+# shared by every player on that team -- exactly the structure a real
+# team-context candidate (e.g. Team_OL_Composite) has, but with NO true
+# relationship to the outcome by construction.
+g3_base$zero_effect_broadcast <- ave(rnorm(nrow(g3_base)), g3_base$Season, g3_base$Team, FUN = function(x) x[1])
+g3_data <- g3_base %>%
+  group_by(Season) %>%
+  mutate(
+    expected_ppg = predict(lm(season_ppg ~ RANK + Prior_PPG)),
+    residual = season_ppg - expected_ppg,
+    is_breakout = as.integer(residual >= quantile(residual, 0.75)),
+    is_bust     = as.integer(residual <= quantile(residual, 0.25))
+  ) %>% ungroup() %>% as.data.frame()
+
+all_pass <- test_pass(
+  "(fixture sanity) zero_effect_broadcast is genuinely broadcast -- every player on a team-season shares one value",
+  all(sapply(split(g3_data$zero_effect_broadcast, list(g3_data$Season, g3_data$Team)), function(x) length(unique(x)) == 1))
+) && all_pass
+
+G3_BIAS_META <- 2
+G3_BIAS_REPLICATES <- 15
+G3_BIAS_N_BOOT <- 80
+G3_COVERAGE_REPLICATES <- 40
+
+g3_result_player <- run_estimation_for_position(
+  "GATE3PLAYER", g3_data, candidates = "zero_effect_broadcast",
+  representative_candidate_col = "zero_effect_broadcast",
+  seasons_to_test = 2001:2012, min_games = 0, decay_r = 0.5, lookback_years = 4,
+  n_boot = 100, run_coverage_spotcheck = TRUE, coverage_n_replicates = G3_COVERAGE_REPLICATES,
+  bias_n_meta_replicates = G3_BIAS_META, bias_n_replicates = G3_BIAS_REPLICATES, bias_n_boot = G3_BIAS_N_BOOT,
+  cache_path = tempfile(fileext = ".csv"), permute_within = "player", emit_direct_reads = FALSE
+)
+g3_result_team <- run_estimation_for_position(
+  "GATE3TEAM", g3_data, candidates = "zero_effect_broadcast",
+  representative_candidate_col = "zero_effect_broadcast",
+  seasons_to_test = 2001:2012, min_games = 0, decay_r = 0.5, lookback_years = 4,
+  n_boot = 100, run_coverage_spotcheck = TRUE, coverage_n_replicates = G3_COVERAGE_REPLICATES,
+  bias_n_meta_replicates = G3_BIAS_META, bias_n_replicates = G3_BIAS_REPLICATES, bias_n_boot = G3_BIAS_N_BOOT,
+  cache_path = tempfile(fileext = ".csv"), permute_within = "team", team_col = "Team", emit_direct_reads = FALSE
+)
+
+g3_cov_player <- attr(g3_result_player, "coverage_spotcheck")
+g3_cov_team <- attr(g3_result_team, "coverage_spotcheck")
+g3_bias_player <- attr(g3_result_player, "null_bias")
+g3_bias_team <- attr(g3_result_team, "null_bias")
+
+cat(sprintf("\nPLAYER mode: null_bias=%.5f  coverage=%.3f (%d/%d)  p_vs_nominal=%.3f\n",
+            g3_bias_player, g3_cov_player$Coverage_Rate, g3_cov_player$N_Covered, g3_cov_player$N_Trials, g3_cov_player$P_Value_Vs_Nominal))
+cat(sprintf("TEAM   mode: null_bias=%.5f  coverage=%.3f (%d/%d)  p_vs_nominal=%.3f\n",
+            g3_bias_team, g3_cov_team$Coverage_Rate, g3_cov_team$N_Covered, g3_cov_team$N_Trials, g3_cov_team$P_Value_Vs_Nominal))
+
+all_pass <- test_pass(
+  "team-mode's null bias magnitude is larger than player-mode's -- confirms the two modes are measuring genuinely different things on a team-clustered candidate, not silently aliasing each other",
+  abs(g3_bias_team) > abs(g3_bias_player)
+) && all_pass
+all_pass <- test_pass(
+  # NOT a "closer to nominal by absolute distance" check -- an
+  # over-covering (conservative) mode can legitimately sit farther from
+  # 0.90 in raw distance than an under-covering (anti-conservative) mode
+  # while still being the SAFER choice, since the whole point of this
+  # bias-correction machinery is to avoid the anti-conservative direction
+  # (overstating a null candidate's significance), not to minimize
+  # absolute distance from nominal. The core calibration criterion is
+  # DIRECTIONAL: does team-mode avoid the risky (below-nominal,
+  # anti-conservative) side that player-mode falls on here?
+  "team-mode's coverage sits at/above nominal (the safe, conservative direction) while player-mode's sits below nominal (the risky, anti-conservative direction that matches this project's known WR player-pool ~87%-vs-90% precedent) -- the core calibration criterion",
+  g3_cov_player$Coverage_Rate < 0.90 && g3_cov_team$Coverage_Rate >= 0.90
+) && all_pass
+all_pass <- test_pass(
+  "team-mode's coverage is NOT flagged as below-nominal by this project's own one-sided binomial coverage test (p >= 0.10)",
+  g3_cov_team$P_Value_Vs_Nominal >= 0.10
+) && all_pass
+
+cat("\n=== GATE 3 Overall:", if (all_pass) "ALL TESTS PASSED -- BIAS_PERMUTE_WITHIN resolved to \"team\"" else "AT LEAST ONE TEST FAILED -- DO NOT RESOLVE BIAS_PERMUTE_WITHIN ON THIS BASIS", "===\n")
